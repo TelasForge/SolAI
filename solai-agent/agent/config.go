@@ -4,19 +4,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/solai-agent/capability"
 	solaiconfig "github.com/melodyogonna/solai/solai-agent/config"
 	"github.com/melodyogonna/solai/solai-agent/tool"
 	"github.com/melodyogonna/solai/solai-agent/wallet"
-	"github.com/tmc/langchaingo/llms"
-	lctools "github.com/tmc/langchaingo/tools"
 )
 
 // Config holds all runtime configuration for the agent.
 // It is built once in main.go and passed into Run.
 type Config struct {
-	// LLM is the initialized language model. Assigned by the caller after LoadConfigFrom returns.
-	LLM llms.Model
+	// LLM is the initialized OpenRouter client. Assigned by the caller after
+	// LoadConfigFrom returns.
+	LLM *llm.Client
 
 	// SystemPrompt is the content of the SYSTEM_PROMPT file, loaded at startup.
 	// It defines the agent's role, rules, and tool usage patterns.
@@ -36,7 +36,7 @@ type Config struct {
 	// If a cycle exceeds this, it is cancelled and the next one starts immediately.
 	CycleTimeout time.Duration
 
-	// LLMProvider manages API credentials for LLM providers used by agentic tools.
+	// LLMProvider manages the OpenRouter credential used by agentic tools.
 	LLMProvider *capability.LLMProvider
 
 	// SystemManager owns tool loading, LLM provider logging, and cleanup job scheduling.
@@ -48,13 +48,14 @@ type Config struct {
 // allowing the CLI path to bypass environment variables entirely.
 //
 // Note: LoadConfigFrom does not initialize the LLM or set Config.LLM. The caller
-// is responsible for constructing the LLM with cfg.APIKey and assigning it.
+// is responsible for constructing the client with cfg.Providers["openrouter"] and
+// assigning it.
 func LoadConfigFrom(cfg *solaiconfig.SolaiConfig, toolsDir, systemPrompt string) (Config, error) {
-	if cfg.Model.Provider == "" || cfg.Model.Name == "" {
-		return Config{}, fmt.Errorf("model not configured (run: solai config set model.provider <google|openai|anthropic> && solai config set model.name <model>)")
+	if cfg.Model.Name == "" {
+		return Config{}, fmt.Errorf("model not configured (run: solai config set model.name <openrouter-model-slug>)")
 	}
-	if cfg.Providers[cfg.Model.Provider] == "" {
-		return Config{}, fmt.Errorf("no API key for provider %q (run: solai config set provider.%s <key>)", cfg.Model.Provider, cfg.Model.Provider)
+	if cfg.Providers["openrouter"] == "" {
+		return Config{}, fmt.Errorf("no OpenRouter API key (run: solai config set provider.openrouter <key>)")
 	}
 
 	kp, err := wallet.CreateWallet(cfg.WalletSeed)
@@ -64,9 +65,9 @@ func LoadConfigFrom(cfg *solaiconfig.SolaiConfig, toolsDir, systemPrompt string)
 
 	cycleInterval := parseDuration(cfg.CycleTimeout, 5*time.Minute)
 
-	llmProvider := capability.NewLLMProviderFromMap(cfg.Providers)
-	loader := func(bwrapPath string, capManager *capability.CapabilityManager) ([]lctools.Tool, []error, error) {
-		return tool.LoadTools(toolsDir, llmProvider, capManager, bwrapPath, cfg)
+	llmProvider := capability.NewLLMProviderFromMap(cfg.Providers, cfg.OpenRouterBaseURL)
+	loader := func(capManager *capability.CapabilityManager) ([]llm.Tool, []error, error) {
+		return tool.LoadTools(toolsDir, llmProvider, capManager, cfg)
 	}
 	systemManager := capability.NewSystemManager(loader, llmProvider)
 
@@ -75,7 +76,7 @@ func LoadConfigFrom(cfg *solaiconfig.SolaiConfig, toolsDir, systemPrompt string)
 		UserGoals:     cfg.UserGoals,
 		ToolsDir:      toolsDir,
 		Wallet:        &kp,
-		CycleTimeout: cycleInterval,
+		CycleTimeout:  cycleInterval,
 		LLMProvider:   llmProvider,
 		SystemManager: systemManager,
 	}, nil

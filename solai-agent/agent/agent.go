@@ -3,29 +3,32 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/ratelimit"
 	"github.com/melodyogonna/solai/solai-agent/capability"
-	"github.com/tmc/langchaingo/agents"
-	"github.com/tmc/langchaingo/chains"
-	"github.com/tmc/langchaingo/memory"
-	"github.com/tmc/langchaingo/schema"
-	lctools "github.com/tmc/langchaingo/tools"
 )
 
 // cycleRetry is the retry strategy used for each agent cycle.
 // It retries up to 3 times with exponential backoff starting at 2s, capped at 30s.
 var cycleRetry = ratelimit.NewExponentialRetry(3, 2*time.Second, 30*time.Second, 2.0)
 
+// maxCycleIterations bounds tool-calling rounds within a single cycle.
+const maxCycleIterations = 10
+
+// historyUserTurns is how many prior user turns are carried between cycles.
+// The cut always lands on a user-message boundary so tool calls and their
+// results are never split.
+const historyUserTurns = 3
+
 // Run is the main entry point for the autonomous agent loop.
 // It blocks until ctx is cancelled, running one agent cycle per CycleInterval.
 //
 // On startup it loads agentic tools from cfg.ToolsDir, then enters a loop where
-// each iteration runs a full ReAct cycle using the configured LLM and tools.
+// each iteration runs a full native tool-calling cycle using the configured LLM.
 func Run(ctx context.Context, cfg Config, capManager *capability.CapabilityManager) {
 	warnings, err := cfg.SystemManager.Setup(capManager)
 	if err != nil {
@@ -47,8 +50,7 @@ func Run(ctx context.Context, cfg Config, capManager *capability.CapabilityManag
 		}
 	}
 
-	windowMem := memory.NewConversationWindowBuffer(3)
-
+	var history []llm.Message
 	var cycleNum int
 	for {
 		select {
@@ -61,24 +63,28 @@ func Run(ctx context.Context, cfg Config, capManager *capability.CapabilityManag
 		cycleNum++
 		slog.Info("starting agent cycle", "cycle", cycleNum)
 		cycleCtx, cancel := context.WithTimeout(ctx, cfg.CycleTimeout)
-		cyclePrompt := buildCyclePrompt(cfg, capManager, cfg.SystemManager.GetTools())
+		cyclePrompt := buildCyclePrompt(cfg, capManager)
 		slog.Debug("cycle prompt", "cycle", cycleNum, "prompt", cyclePrompt)
-		answer, err := runCycle(cycleCtx, cfg, agentTools, cyclePrompt, windowMem)
+		answer, newHistory, err := runCycle(cycleCtx, cfg, agentTools, cyclePrompt, history)
 		cancel()
 
 		if err != nil {
 			handleCycleError(cycleNum, err)
 		} else {
+			history = llm.TrimHistory(newHistory, historyUserTurns)
 			slog.Info("cycle complete", "cycle", cycleNum, "answer", answer)
 		}
 	}
 }
 
-// runCycle executes one complete ReAct cycle with exponential retry on transient errors.
-// It creates a fresh agent each attempt but shares the window memory across retries and cycles.
-// Non-transient errors (ErrNotFinished, context cancellation/timeout) are not retried.
-func runCycle(ctx context.Context, cfg Config, agentTools []lctools.Tool, prompt string, mem schema.Memory) (string, error) {
-	var answer string
+// runCycle executes one complete tool-calling cycle with exponential retry on
+// transient errors. Non-transient errors (max iterations, context
+// cancellation/timeout) are not retried.
+func runCycle(ctx context.Context, cfg Config, agentTools []llm.Tool, prompt string, history []llm.Message) (string, []llm.Message, error) {
+	var (
+		answer     string
+		newHistory []llm.Message
+	)
 	attempt := 0
 	err := cycleRetry.Execute(ctx, func(ctx context.Context) error {
 		attempt++
@@ -88,16 +94,11 @@ func runCycle(ctx context.Context, cfg Config, agentTools []lctools.Tool, prompt
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		a := agents.NewOneShotAgent(
-			cfg.LLM,
-			agentTools,
-			agents.WithMaxIterations(10),
-			agents.WithPromptPrefix(cfg.SystemPrompt),
-		)
-		executor := agents.NewExecutor(a, agents.WithMemory(mem))
+		a := llm.NewAgent(cfg.LLM, agentTools, cfg.SystemPrompt,
+			llm.WithMaxIterations(maxCycleIterations))
 		var err error
-		answer, err = chains.Run(ctx, executor, prompt)
-		if errors.Is(err, agents.ErrNotFinished) {
+		answer, newHistory, err = a.Run(ctx, prompt, history)
+		if errors.Is(err, llm.ErrMaxIterations) {
 			// Not a transient error — stop retrying immediately.
 			return &noRetryError{err}
 		}
@@ -105,9 +106,9 @@ func runCycle(ctx context.Context, cfg Config, agentTools []lctools.Tool, prompt
 	})
 	var nre *noRetryError
 	if errors.As(err, &nre) {
-		return "", nre.err
+		return "", newHistory, nre.err
 	}
-	return answer, err
+	return answer, newHistory, err
 }
 
 // noRetryError wraps an error to signal that cycleRetry should not attempt further retries.
@@ -115,34 +116,12 @@ type noRetryError struct{ err error }
 
 func (e *noRetryError) Error() string { return e.err.Error() }
 
-// buildCyclePrompt assembles the input string passed to chains.Run each cycle.
-// It lists ALL available tools (capabilities + agentic tools) so the agent has
-// a complete, consistent view before seeing the langchaingo ReAct tool list.
-// It also injects any MemorySectionProvider sections (e.g. MemoryCapability).
-// This is the "Question" the ReAct agent receives; the system prompt is the "Prefix".
-func buildCyclePrompt(cfg Config, capManager *capability.CapabilityManager, agenticTools []lctools.Tool) string {
+// buildCyclePrompt assembles the user message passed to the agent each cycle.
+// Tool definitions are advertised natively via the function-calling API, so
+// the prompt only carries dynamic state: any MemorySectionProvider sections
+// (e.g. MemoryCapability) and the user's goals.
+func buildCyclePrompt(cfg Config, capManager *capability.CapabilityManager) string {
 	var sections []string
-	var toolSection strings.Builder
-	var hasTools bool
-
-	if capSection := capManager.BuildCapabilityPromptSection(); capSection != "" {
-		toolSection.WriteString("## Available Tools\n\n### Built-in Capabilities\n")
-		toolSection.WriteString(capSection)
-		hasTools = true
-	}
-	if len(agenticTools) > 0 {
-		if !hasTools {
-			toolSection.WriteString("## Available Tools\n")
-		}
-		toolSection.WriteString("\n### Agentic Tools\n")
-		for _, t := range agenticTools {
-			fmt.Fprintf(&toolSection, "- **%s**: %s\n", t.Name(), t.Description())
-		}
-		hasTools = true
-	}
-	if hasTools {
-		sections = append(sections, strings.TrimRight(toolSection.String(), "\n"))
-	}
 
 	for _, c := range capManager.GetAll() {
 		if mp, ok := c.(capability.MemorySectionProvider); ok {
@@ -160,7 +139,7 @@ func buildCyclePrompt(cfg Config, capManager *capability.CapabilityManager, agen
 // The agent loop always continues after an error — it never crashes.
 func handleCycleError(cycleNum int, err error) {
 	switch {
-	case errors.Is(err, agents.ErrNotFinished):
+	case errors.Is(err, llm.ErrMaxIterations):
 		slog.Warn("cycle did not finish within max iterations — tools may be insufficient for the specified goals", "cycle", cycleNum)
 	case errors.Is(err, context.DeadlineExceeded):
 		slog.Warn("cycle timed out", "cycle", cycleNum)

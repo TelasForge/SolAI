@@ -11,14 +11,22 @@ import (
 
 // SolaiConfig is the top-level configuration stored in ~/.solai/config.json.
 type SolaiConfig struct {
-	Model         ModelConfig                  `json:"model"`
-	Providers     map[string]string            `json:"providers"` // google/openai/anthropic → api key
-	WalletSeed    string                       `json:"wallet_seed"`
-	CycleTimeout  string                       `json:"cycle_timeout"`
-	UserGoals     string                       `json:"user_goals"`
-	Sandbox       SandboxConfig                `json:"sandbox"`
-	Solana        SolanaConfig                 `json:"solana"`
-	ToolEnv       map[string]map[string]string `json:"tool_env,omitempty"` // tool name → var name → value
+	// Model selects the LLM the coordinator uses, as an OpenRouter model slug
+	// (e.g. "anthropic/claude-sonnet-4", "openai/gpt-4o", "google/gemini-2.5-pro").
+	Model ModelConfig `json:"model"`
+
+	// Providers holds API credentials keyed by provider name. OpenRouter is the
+	// only provider used by this build; the key is "openrouter".
+	Providers map[string]string `json:"providers"`
+
+	// OpenRouterBaseURL overrides the OpenRouter API root. Empty uses the default.
+	OpenRouterBaseURL string `json:"openrouter_base_url,omitempty"`
+
+	WalletSeed   string                       `json:"wallet_seed"`
+	CycleTimeout string                       `json:"cycle_timeout"`
+	UserGoals    string                       `json:"user_goals"`
+	Solana       SolanaConfig                 `json:"solana"`
+	ToolEnv      map[string]map[string]string `json:"tool_env,omitempty"` // tool name → var name → value
 }
 
 // SolanaConfig controls how the agent interacts with the Solana blockchain.
@@ -29,20 +37,8 @@ type SolanaConfig struct {
 
 // ModelConfig identifies the LLM the coordinator uses.
 type ModelConfig struct {
-	Provider string `json:"provider"` // "google", "openai", or "anthropic"
-	Name     string `json:"name"`     // e.g. "gemini-2.5-pro", "gpt-4o", "claude-opus-4-6"
-}
-
-// SandboxConfig controls how the agent process is sandboxed by bwrap.
-type SandboxConfig struct {
-	ShareNet   bool     `json:"share_net"`
-	ExtraBinds []FSBind `json:"extra_binds"`
-}
-
-// FSBind is an extra filesystem path exposed inside the agent sandbox.
-type FSBind struct {
-	Path     string `json:"path"`
-	ReadOnly bool   `json:"read_only"`
+	// Name is an OpenRouter model slug, e.g. "anthropic/claude-sonnet-4".
+	Name string `json:"name"`
 }
 
 // Dir returns the ~/.solai directory path.
@@ -69,12 +65,8 @@ func ConfigPath() string {
 // DefaultConfig returns a SolaiConfig with sensible defaults.
 func DefaultConfig() *SolaiConfig {
 	return &SolaiConfig{
-		Providers:     map[string]string{},
+		Providers:    map[string]string{},
 		CycleTimeout: "5m",
-		Sandbox: SandboxConfig{
-			ShareNet:   true,
-			ExtraBinds: []FSBind{},
-		},
 		Solana: SolanaConfig{
 			RPCURL:     "https://api.mainnet-beta.solana.com",
 			Commitment: "confirmed",
@@ -125,30 +117,21 @@ func (c *SolaiConfig) Save() error {
 
 // Set updates a single configuration value by dot-notation key.
 //
-// Supported keys: model.provider, model.name, provider.<name>,
-// wallet-seed, cycle-timeout, user-goals, sandbox.share-net,
+// Supported keys: model.name, provider.<name>, openrouter.base-url,
+// wallet-seed, cycle-timeout, user-goals,
 // solana.rpc-url, solana.commitment, tool-env.<tool>.<VAR>.
 func (c *SolaiConfig) Set(key, value string) error {
 	switch key {
-	case "model.provider":
-		c.Model.Provider = value
 	case "model.name":
 		c.Model.Name = value
+	case "openrouter.base-url":
+		c.OpenRouterBaseURL = value
 	case "wallet-seed":
 		c.WalletSeed = value
 	case "cycle-timeout":
 		c.CycleTimeout = value
 	case "user-goals":
 		c.UserGoals = value
-	case "sandbox.share-net":
-		switch strings.ToLower(value) {
-		case "true", "1", "yes":
-			c.Sandbox.ShareNet = true
-		case "false", "0", "no":
-			c.Sandbox.ShareNet = false
-		default:
-			return fmt.Errorf("sandbox.share-net: expected true/false, got %q", value)
-		}
 	case "solana.rpc-url":
 		c.Solana.RPCURL = value
 	case "solana.commitment":
@@ -174,7 +157,7 @@ func (c *SolaiConfig) Set(key, value string) error {
 			c.ToolEnv[toolName][varName] = value
 			return nil
 		}
-		return fmt.Errorf("unknown config key %q; valid keys: model.provider, model.name, provider.<name>, wallet-seed, cycle-timeout, user-goals, sandbox.share-net, solana.rpc-url, solana.commitment, tool-env.<tool>.<VAR>", key)
+		return fmt.Errorf("unknown config key %q; valid keys: model.name, provider.<name>, openrouter.base-url, wallet-seed, cycle-timeout, user-goals, solana.rpc-url, solana.commitment, tool-env.<tool>.<VAR>", key)
 	}
 	return nil
 }
@@ -182,21 +165,16 @@ func (c *SolaiConfig) Set(key, value string) error {
 // Get retrieves a single configuration value by dot-notation key.
 func (c *SolaiConfig) Get(key string) (string, error) {
 	switch key {
-	case "model.provider":
-		return c.Model.Provider, nil
 	case "model.name":
 		return c.Model.Name, nil
+	case "openrouter.base-url":
+		return c.OpenRouterBaseURL, nil
 	case "wallet-seed":
 		return c.WalletSeed, nil
 	case "cycle-timeout":
 		return c.CycleTimeout, nil
 	case "user-goals":
 		return c.UserGoals, nil
-	case "sandbox.share-net":
-		if c.Sandbox.ShareNet {
-			return "true", nil
-		}
-		return "false", nil
 	case "solana.rpc-url":
 		return c.Solana.RPCURL, nil
 	case "solana.commitment":

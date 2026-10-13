@@ -1,5 +1,4 @@
-// Package prompts embeds the agent system prompt so it is available
-// inside the bwrap sandbox without any file bind-mount.
+// Package prompts embeds the agent system prompt into the binary.
 package prompts
 
 import _ "embed"

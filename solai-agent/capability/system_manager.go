@@ -3,23 +3,19 @@ package capability
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
-	"github.com/melodyogonna/solai/solai-agent/sandbox"
-	lctools "github.com/tmc/langchaingo/tools"
+	"github.com/melodyogonna/solai/llm"
 )
 
 // ToolLoaderFunc loads agentic tools. Injected into SystemManager to avoid
 // circular imports between capability and tool packages.
 //
-// bwrapPath is the path to the extracted bwrap binary, or empty when sandboxing
-// is unavailable. capManager provides capability validation and is passed through
-// to each loaded tool so it can dispatch capability requests at runtime.
-type ToolLoaderFunc func(bwrapPath string, capManager *CapabilityManager) ([]lctools.Tool, []error, error)
+// capManager provides capability validation and is passed through to each
+// loaded tool so it can dispatch capability requests at runtime.
+type ToolLoaderFunc func(capManager *CapabilityManager) ([]llm.Tool, []error, error)
 
 // CleanupJob is a periodic administrative task run by SystemManager in the background.
 type CleanupJob struct {
@@ -29,14 +25,13 @@ type CleanupJob struct {
 }
 
 // SystemManager is a Core capability that owns the agent's operational environment:
-// tool loading, LLM provider logging, sandbox extraction, and cleanup job scheduling.
+// tool loading, LLM provider logging, and cleanup job scheduling.
 type SystemManager struct {
 	loader   ToolLoaderFunc
 	provider *LLMProvider
-	tools    []lctools.Tool
+	tools    []llm.Tool
 	jobs     []CleanupJob
 	ready    bool
-	bwrapPath string // extracted bwrap binary path; empty if sandbox unavailable
 }
 
 // NewSystemManager creates a SystemManager with the given tool loader and LLM provider.
@@ -72,11 +67,10 @@ func (m *SystemManager) Execute(_ context.Context, _ string) (string, error) {
 	}
 
 	status := map[string]any{
-		"tools_loaded":      len(m.tools),
-		"tools":             toolNames,
-		"jobs_registered":   len(m.jobs),
-		"jobs":              jobNames,
-		"sandbox_available": m.bwrapPath != "",
+		"tools_loaded":    len(m.tools),
+		"tools":           toolNames,
+		"jobs_registered": len(m.jobs),
+		"jobs":            jobNames,
 	}
 	data, err := json.Marshal(status)
 	if err != nil {
@@ -87,41 +81,20 @@ func (m *SystemManager) Execute(_ context.Context, _ string) (string, error) {
 
 // Setup prepares the agent's operational environment:
 //  1. Logs configured LLM providers.
-//  2. Extracts the embedded bwrap sandbox binary (unless SANDBOX=disabled).
-//  3. Loads tools via the injected loader, passing the bwrap path and capManager.
+//  2. Loads tools via the injected loader.
 //
 // capManager is passed to the tool loader for capability validation and runtime
 // request dispatch. It must not be nil.
 //
 // Returns (warnings, fatal_error). Must be called before GetTools.
-//
-// Sandbox behaviour is controlled by the SANDBOX environment variable:
-//   - unset / any other value: extract bwrap; fall back to unsandboxed on error
-//   - "required": fatal error if bwrap cannot be extracted
-//   - "disabled": skip extraction entirely; all tools run unsandboxed
 func (m *SystemManager) Setup(capManager *CapabilityManager) ([]error, error) {
 	if providers := m.provider.ConfiguredProviders(); len(providers) > 0 {
-		slog.Info("LLM providers configured", "providers", providers)
+		slog.Info("LLM provider configured", "providers", providers)
 	} else {
-		slog.Warn("no LLM providers configured — tools requiring an LLM will be disabled")
+		slog.Warn("no OpenRouter API key configured — tools requiring an LLM will be disabled")
 	}
 
-	if os.Getenv("SANDBOX") == "disabled" {
-		slog.Info("sandboxing disabled (SANDBOX=disabled); tools will run unsandboxed")
-	} else {
-		bwrapPath, err := sandbox.Extract()
-		if err != nil {
-			if os.Getenv("SANDBOX") == "required" {
-				return nil, fmt.Errorf("sandbox extraction failed (SANDBOX=required): %w", err)
-			}
-			slog.Warn("sandbox not available; tools will run unsandboxed", "err", err)
-		} else {
-			m.bwrapPath = bwrapPath
-			slog.Info("sandbox binary extracted", "path", bwrapPath, "version", sandbox.BwrapVersion)
-		}
-	}
-
-	tools, warnings, err := m.loader(m.bwrapPath, capManager)
+	tools, warnings, err := m.loader(capManager)
 	if err != nil {
 		return nil, err
 	}
@@ -131,16 +104,12 @@ func (m *SystemManager) Setup(capManager *CapabilityManager) ([]error, error) {
 }
 
 // GetTools returns tools loaded by Setup. Panics if Setup was not called first.
-func (m *SystemManager) GetTools() []lctools.Tool {
+func (m *SystemManager) GetTools() []llm.Tool {
 	if !m.ready {
 		panic("system_manager: GetTools called before Setup")
 	}
 	return m.tools
 }
-
-// BwrapPath returns the path to the extracted sandbox binary, or empty string
-// if the sandbox is not available. Useful for diagnostics.
-func (m *SystemManager) BwrapPath() string { return m.bwrapPath }
 
 // RegisterJob appends a cleanup job. Must be called before Start.
 func (m *SystemManager) RegisterJob(job CleanupJob) {
@@ -149,7 +118,6 @@ func (m *SystemManager) RegisterJob(job CleanupJob) {
 
 // Start launches one goroutine per registered job and blocks until ctx is cancelled,
 // then waits for all goroutines to exit. Designed to be called as go sm.Start(ctx).
-// When ctx is cancelled, any extracted sandbox binary temp file is removed.
 func (m *SystemManager) Start(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, job := range m.jobs {
@@ -160,20 +128,9 @@ func (m *SystemManager) Start(ctx context.Context) {
 		}(job)
 	}
 
-	// Always wait for ctx cancellation before cleanup. Without this, Start
-	// returns immediately when no jobs are registered and removes the bwrap
-	// temp file before any tool has had a chance to use it.
+	// Wait for ctx cancellation so Start only returns once all jobs have stopped.
 	<-ctx.Done()
 	wg.Wait()
-
-	// Remove the extracted bwrap temp file on shutdown.
-	if m.bwrapPath != "" {
-		if err := os.Remove(m.bwrapPath); err != nil && !os.IsNotExist(err) {
-			slog.Warn("failed to remove sandbox binary temp file", "path", m.bwrapPath, "err", err)
-		} else {
-			slog.Debug("sandbox binary temp file removed", "path", m.bwrapPath)
-		}
-	}
 }
 
 // runJob runs a single cleanup job on its interval until ctx is cancelled.

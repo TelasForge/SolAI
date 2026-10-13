@@ -107,7 +107,7 @@ func TestNetworkManagerCapability_Class(t *testing.T) {
 func TestNetworkManagerCapability_Description_Empty(t *testing.T) {
 	// network-manager intentionally has an empty description so it is not
 	// shown to the coordinator LLM as a callable tool. Network access is
-	// granted via sandbox policy, not by direct LLM invocation.
+	// declared statically via required_capabilities, not by direct LLM invocation.
 	n := NewNetworkManagerCapability()
 	if n.Description() != "" {
 		t.Errorf("expected empty description, got %q", n.Description())

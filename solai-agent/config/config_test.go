@@ -23,61 +23,43 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.CycleTimeout != "5m" {
 		t.Errorf("CycleTimeout: got %q, want %q", cfg.CycleTimeout, "5m")
 	}
-	if !cfg.Sandbox.ShareNet {
-		t.Error("Sandbox.ShareNet: expected true by default")
-	}
-	if cfg.Sandbox.ExtraBinds == nil {
-		t.Error("Sandbox.ExtraBinds: expected non-nil slice")
-	}
 	if cfg.Providers == nil {
 		t.Error("Providers: expected non-nil map")
 	}
-	if cfg.Model.Provider != "" || cfg.Model.Name != "" {
-		t.Error("Model: expected empty by default")
+	if cfg.Model.Name != "" {
+		t.Error("Model.Name: expected empty by default")
 	}
 }
 
 // ---- Set ------------------------------------------------------------------
 
-func TestSet_ModelProvider(t *testing.T) {
-	cfg := DefaultConfig()
-	if err := cfg.Set("model.provider", "openai"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Model.Provider != "openai" {
-		t.Errorf("got %q, want %q", cfg.Model.Provider, "openai")
-	}
-}
-
 func TestSet_ModelName(t *testing.T) {
 	cfg := DefaultConfig()
-	if err := cfg.Set("model.name", "gpt-4o"); err != nil {
+	if err := cfg.Set("model.name", "anthropic/claude-sonnet-4"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Model.Name != "gpt-4o" {
-		t.Errorf("got %q, want %q", cfg.Model.Name, "gpt-4o")
+	if cfg.Model.Name != "anthropic/claude-sonnet-4" {
+		t.Errorf("got %q", cfg.Model.Name)
 	}
 }
 
 func TestSet_Providers(t *testing.T) {
-	tests := []struct {
-		key      string
-		provider string
-	}{
-		{"provider.google", "google"},
-		{"provider.openai", "openai"},
-		{"provider.anthropic", "anthropic"},
+	cfg := DefaultConfig()
+	if err := cfg.Set("provider.openrouter", "sk-or-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.key, func(t *testing.T) {
-			cfg := DefaultConfig()
-			if err := cfg.Set(tc.key, "mykey"); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cfg.Providers[tc.provider] != "mykey" {
-				t.Errorf("Providers[%q] = %q, want %q", tc.provider, cfg.Providers[tc.provider], "mykey")
-			}
-		})
+	if cfg.Providers["openrouter"] != "sk-or-key" {
+		t.Errorf("Providers[openrouter] = %q", cfg.Providers["openrouter"])
+	}
+}
+
+func TestSet_OpenRouterBaseURL(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := cfg.Set("openrouter.base-url", "https://example.test/api/v1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenRouterBaseURL != "https://example.test/api/v1" {
+		t.Errorf("got %q", cfg.OpenRouterBaseURL)
 	}
 }
 
@@ -105,39 +87,16 @@ func TestSet_UserGoals(t *testing.T) {
 	}
 }
 
-func TestSet_SandboxShareNet(t *testing.T) {
-	tests := []struct {
-		value string
-		want  bool
-		err   bool
-	}{
-		{"true", true, false},
-		{"false", false, false},
-		{"1", true, false},
-		{"0", false, false},
-		{"yes", true, false},
-		{"no", false, false},
-		{"TRUE", true, false},
-		{"FALSE", false, false},
-		{"maybe", false, true},
+func TestSet_SolanaCommitment(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := cfg.Set("solana.commitment", "finalized"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.value, func(t *testing.T) {
-			cfg := DefaultConfig()
-			err := cfg.Set("sandbox.share-net", tc.value)
-			if tc.err {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cfg.Sandbox.ShareNet != tc.want {
-				t.Errorf("ShareNet: got %v, want %v", cfg.Sandbox.ShareNet, tc.want)
-			}
-		})
+	if cfg.Solana.Commitment != "finalized" {
+		t.Errorf("got %q", cfg.Solana.Commitment)
+	}
+	if err := cfg.Set("solana.commitment", "bogus"); err == nil {
+		t.Error("expected error for invalid commitment")
 	}
 }
 
@@ -156,26 +115,22 @@ func TestSet_UnknownKey(t *testing.T) {
 
 func TestGet_AllKeys(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Model.Provider = "google"
-	cfg.Model.Name = "gemini-2.5-pro"
-	cfg.Providers["google"] = "gkey"
-	cfg.Providers["openai"] = "okey"
-	cfg.Providers["anthropic"] = "akey"
+	cfg.Model.Name = "openai/gpt-4o"
+	cfg.Providers["openrouter"] = "or-key"
+	cfg.OpenRouterBaseURL = "https://example.test/api/v1"
 	cfg.WalletSeed = "seed phrase"
 	cfg.CycleTimeout = "15m"
 	cfg.UserGoals = "do stuff"
-	cfg.Sandbox.ShareNet = false
 
 	tests := []struct{ key, want string }{
-		{"model.provider", "google"},
-		{"model.name", "gemini-2.5-pro"},
-		{"provider.google", "gkey"},
-		{"provider.openai", "okey"},
-		{"provider.anthropic", "akey"},
+		{"model.name", "openai/gpt-4o"},
+		{"provider.openrouter", "or-key"},
+		{"openrouter.base-url", "https://example.test/api/v1"},
 		{"wallet-seed", "seed phrase"},
 		{"cycle-timeout", "15m"},
 		{"user-goals", "do stuff"},
-		{"sandbox.share-net", "false"},
+		{"solana.rpc-url", "https://api.mainnet-beta.solana.com"},
+		{"solana.commitment", "confirmed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.key, func(t *testing.T) {
@@ -187,17 +142,6 @@ func TestGet_AllKeys(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestGet_SandboxShareNet_True(t *testing.T) {
-	cfg := DefaultConfig() // ShareNet defaults to true
-	got, err := cfg.Get("sandbox.share-net")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "true" {
-		t.Errorf("got %q, want %q", got, "true")
 	}
 }
 
@@ -215,12 +159,11 @@ func TestSave_Load_RoundTrip(t *testing.T) {
 	useTempHome(t)
 
 	cfg := DefaultConfig()
-	cfg.Model.Provider = "anthropic"
-	cfg.Model.Name = "claude-opus-4-6"
-	cfg.Providers["anthropic"] = "sk-ant-test"
+	cfg.Model.Name = "anthropic/claude-sonnet-4"
+	cfg.Providers["openrouter"] = "sk-or-test"
+	cfg.OpenRouterBaseURL = "https://example.test/api/v1"
 	cfg.UserGoals = "analyze Solana DeFi"
 	cfg.CycleTimeout = "30m"
-	cfg.Sandbox.ShareNet = false
 
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -231,23 +174,20 @@ func TestSave_Load_RoundTrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if loaded.Model.Provider != cfg.Model.Provider {
-		t.Errorf("Model.Provider: got %q, want %q", loaded.Model.Provider, cfg.Model.Provider)
-	}
 	if loaded.Model.Name != cfg.Model.Name {
 		t.Errorf("Model.Name: got %q, want %q", loaded.Model.Name, cfg.Model.Name)
 	}
-	if loaded.Providers["anthropic"] != "sk-ant-test" {
-		t.Errorf("Providers[anthropic]: got %q", loaded.Providers["anthropic"])
+	if loaded.Providers["openrouter"] != "sk-or-test" {
+		t.Errorf("Providers[openrouter]: got %q", loaded.Providers["openrouter"])
+	}
+	if loaded.OpenRouterBaseURL != cfg.OpenRouterBaseURL {
+		t.Errorf("OpenRouterBaseURL: got %q", loaded.OpenRouterBaseURL)
 	}
 	if loaded.UserGoals != cfg.UserGoals {
 		t.Errorf("UserGoals: got %q, want %q", loaded.UserGoals, cfg.UserGoals)
 	}
 	if loaded.CycleTimeout != "30m" {
 		t.Errorf("CycleTimeout: got %q", loaded.CycleTimeout)
-	}
-	if loaded.Sandbox.ShareNet {
-		t.Error("Sandbox.ShareNet: expected false")
 	}
 }
 
@@ -263,9 +203,6 @@ func TestLoad_CreatesDefaultWhenAbsent(t *testing.T) {
 	if cfg.CycleTimeout != "5m" {
 		t.Errorf("CycleTimeout: got %q", cfg.CycleTimeout)
 	}
-	if !cfg.Sandbox.ShareNet {
-		t.Error("Sandbox.ShareNet: expected true")
-	}
 
 	// config.json should now exist on disk.
 	if _, err := os.Stat(ConfigPath()); err != nil {
@@ -277,7 +214,7 @@ func TestLoad_ReturnsDefaultsForMissingFields(t *testing.T) {
 	useTempHome(t)
 
 	// Write a minimal config missing optional fields.
-	partial := `{"model":{"provider":"google","name":"gemini-2.5-pro"}}`
+	partial := `{"model":{"name":"openai/gpt-4o"}}`
 	if err := os.MkdirAll(Dir(), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -289,8 +226,8 @@ func TestLoad_ReturnsDefaultsForMissingFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Model.Provider != "google" {
-		t.Errorf("Model.Provider: got %q", cfg.Model.Provider)
+	if cfg.Model.Name != "openai/gpt-4o" {
+		t.Errorf("Model.Name: got %q", cfg.Model.Name)
 	}
 	// Defaults from DefaultConfig should apply for missing fields.
 	if cfg.CycleTimeout != "5m" {
@@ -318,7 +255,7 @@ func TestSave_WritesValidJSON(t *testing.T) {
 	useTempHome(t)
 
 	cfg := DefaultConfig()
-	cfg.Model.Provider = "openai"
+	cfg.Model.Name = "openai/gpt-4o"
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}

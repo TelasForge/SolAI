@@ -50,9 +50,8 @@ func TestParseDuration_InvalidString_ReturnsDefault(t *testing.T) {
 
 func defaultSolaiConfig() *solaiconfig.SolaiConfig {
 	cfg := solaiconfig.DefaultConfig()
-	cfg.Model.Provider = "google"
-	cfg.Model.Name = "gemini-2.5-pro"
-	cfg.Providers["google"] = "test-api-key"
+	cfg.Model.Name = "anthropic/claude-sonnet-4"
+	cfg.Providers["openrouter"] = "test-api-key"
 	cfg.UserGoals = "Monitor SOL price"
 	return cfg
 }
@@ -80,15 +79,6 @@ func TestLoadConfigFrom_ValidConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFrom_EmptyModelProvider_Error(t *testing.T) {
-	cfg := defaultSolaiConfig()
-	cfg.Model.Provider = ""
-	_, err := LoadConfigFrom(cfg, t.TempDir(), "")
-	if err == nil {
-		t.Fatal("expected error when model.provider is empty")
-	}
-}
-
 func TestLoadConfigFrom_EmptyModelName_Error(t *testing.T) {
 	cfg := defaultSolaiConfig()
 	cfg.Model.Name = ""
@@ -100,20 +90,10 @@ func TestLoadConfigFrom_EmptyModelName_Error(t *testing.T) {
 
 func TestLoadConfigFrom_MissingProviderKey_Error(t *testing.T) {
 	cfg := defaultSolaiConfig()
-	cfg.Providers["google"] = "" // clear the api key
+	cfg.Providers["openrouter"] = ""
 	_, err := LoadConfigFrom(cfg, t.TempDir(), "")
 	if err == nil {
-		t.Fatal("expected error when provider API key is empty")
-	}
-}
-
-func TestLoadConfigFrom_MismatchedProvider_Error(t *testing.T) {
-	cfg := defaultSolaiConfig()
-	cfg.Model.Provider = "openai"
-	// google key is set but openai is not.
-	_, err := LoadConfigFrom(cfg, t.TempDir(), "")
-	if err == nil {
-		t.Fatal("expected error when selected provider has no key")
+		t.Fatal("expected error when OpenRouter API key is empty")
 	}
 }
 
@@ -171,15 +151,14 @@ func TestLoadConfigFrom_ToolsDirInjected(t *testing.T) {
 
 func TestLoadConfigFrom_LLMProviderReflectsCredentials(t *testing.T) {
 	cfg := defaultSolaiConfig()
-	cfg.Providers["openai"] = "okey"
 	agentCfg, err := LoadConfigFrom(cfg, t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("LoadConfigFrom: %v", err)
 	}
-	if !agentCfg.LLMProvider.IsConfigured("google") {
-		t.Error("expected google to be configured in LLMProvider")
+	if !agentCfg.LLMProvider.IsConfigured() {
+		t.Error("expected OpenRouter to be configured in LLMProvider")
 	}
-	if !agentCfg.LLMProvider.IsConfigured("openai") {
-		t.Error("expected openai to be configured in LLMProvider")
+	if agentCfg.LLMProvider.APIKey() != "test-api-key" {
+		t.Errorf("APIKey: got %q", agentCfg.LLMProvider.APIKey())
 	}
 }

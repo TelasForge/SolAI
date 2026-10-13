@@ -10,7 +10,7 @@ import (
 	solaiconfig "github.com/melodyogonna/solai/solai-agent/config"
 )
 
-// fakeChecker is a CapabilityChecker used by buildSandboxPolicy tests directly.
+// fakeChecker is a CapabilityChecker used by validateCapabilities tests directly.
 type fakeChecker struct {
 	available map[string]bool
 }
@@ -41,6 +41,16 @@ func newCapManager(names ...string) *capability.CapabilityManager {
 	return capability.SetUp(names)
 }
 
+// configuredProvider returns an LLMProvider with an OpenRouter key.
+func configuredProvider() *capability.LLMProvider {
+	return capability.NewLLMProvider("test-key", "")
+}
+
+// unconfiguredProvider returns an LLMProvider with no key.
+func unconfiguredProvider() *capability.LLMProvider {
+	return capability.NewLLMProvider("", "")
+}
+
 // setupTool creates a fake tool directory with a manifest and stub executable.
 func setupTool(t *testing.T, toolsDir, name, manifestContent string) {
 	t.Helper()
@@ -68,8 +78,7 @@ func validManifestJSON(name string) string {
 
 func TestLoadTools_EmptyDir(t *testing.T) {
 	toolsDir := t.TempDir()
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -82,8 +91,7 @@ func TestLoadTools_EmptyDir(t *testing.T) {
 }
 
 func TestLoadTools_InvalidDir(t *testing.T) {
-	provider := capability.NewLLMProviderFromMap(nil)
-	_, _, err := LoadTools("/nonexistent/tools/dir", provider, newCapManager(), "", nil)
+	_, _, err := LoadTools("/nonexistent/tools/dir", unconfiguredProvider(), newCapManager(), nil)
 	if err == nil {
 		t.Fatal("expected error for nonexistent directory")
 	}
@@ -93,8 +101,7 @@ func TestLoadTools_ValidTool_NoLLM(t *testing.T) {
 	toolsDir := t.TempDir()
 	setupTool(t, toolsDir, "my-tool", validManifestJSON("my-tool"))
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -114,8 +121,7 @@ func TestLoadTools_MultipleTools(t *testing.T) {
 	setupTool(t, toolsDir, "tool-a", validManifestJSON("tool-a"))
 	setupTool(t, toolsDir, "tool-b", validManifestJSON("tool-b"))
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, _, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, _, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -131,8 +137,7 @@ func TestLoadTools_MissingManifest_Warning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -154,8 +159,7 @@ func TestLoadTools_InvalidManifest_Warning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	_, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	_, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -176,8 +180,7 @@ func TestLoadTools_MissingExecutable_Warning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -199,14 +202,13 @@ func TestLoadTools_LLMOptions_ProviderConfigured(t *testing.T) {
 		"version": "1.0.0",
 		"executable": "./bin/llm-tool",
 		"llm_options": {
-			"primary": "gemini-2.5-pro",
-			"supported": [{"model": "gemini-2.5-pro", "provider": "google"}]
+			"primary": "anthropic/claude-sonnet-4",
+			"supported": [{"model": "anthropic/claude-sonnet-4"}]
 		}
 	}`
 	setupTool(t, toolsDir, "llm-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(map[string]string{"google": "gkey"})
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, configuredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -226,14 +228,13 @@ func TestLoadTools_LLMOptions_NoProviderConfigured_Warning(t *testing.T) {
 		"version": "1.0.0",
 		"executable": "./bin/llm-tool",
 		"llm_options": {
-			"primary": "gemini-2.5-pro",
-			"supported": [{"model": "gemini-2.5-pro", "provider": "google"}]
+			"primary": "anthropic/claude-sonnet-4",
+			"supported": [{"model": "anthropic/claude-sonnet-4"}]
 		}
 	}`
 	setupTool(t, toolsDir, "llm-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(nil) // no providers configured
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -258,9 +259,8 @@ func TestLoadTools_RequiredCapability_Available(t *testing.T) {
 	}`
 	setupTool(t, toolsDir, "net-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(nil)
 	capMgr := newCapManager("network-manager")
-	tools, warnings, err := LoadTools(toolsDir, provider, capMgr, "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), capMgr, nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -283,9 +283,8 @@ func TestLoadTools_RequiredCapability_Missing_Warning(t *testing.T) {
 	}`
 	setupTool(t, toolsDir, "net-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(nil)
 	capMgr := newCapManager() // network-manager not available
-	tools, warnings, err := LoadTools(toolsDir, provider, capMgr, "", nil)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), capMgr, nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -297,48 +296,35 @@ func TestLoadTools_RequiredCapability_Missing_Warning(t *testing.T) {
 	}
 }
 
-// ---- buildSandboxPolicy -----------------------------------------------------
+// ---- validateCapabilities ---------------------------------------------------
 
-func TestBuildSandboxPolicy_NoCapabilities(t *testing.T) {
+func TestValidateCapabilities_NoCapabilities(t *testing.T) {
 	m := Manifest{Name: "t", Description: "d", Executable: "./bin/t"}
-	policy, err := buildSandboxPolicy(m, newChecker(), "/usr/bin/bwrap")
-	if err != nil {
+	if err := validateCapabilities(m, newChecker()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if policy.ShareNet {
-		t.Error("expected ShareNet=false for no capabilities")
-	}
-	if policy.BwrapPath != "/usr/bin/bwrap" {
-		t.Errorf("BwrapPath: got %q", policy.BwrapPath)
 	}
 }
 
-func TestBuildSandboxPolicy_NetworkManager_SetsShareNet(t *testing.T) {
+func TestValidateCapabilities_Available(t *testing.T) {
 	m := Manifest{
 		Name:                 "t",
 		Description:          "d",
 		Executable:           "./bin/t",
 		RequiredCapabilities: []string{"network-manager"},
 	}
-	checker := newChecker("network-manager")
-	policy, err := buildSandboxPolicy(m, checker, "")
-	if err != nil {
+	if err := validateCapabilities(m, newChecker("network-manager")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !policy.ShareNet {
-		t.Error("expected ShareNet=true for network-manager capability")
 	}
 }
 
-func TestBuildSandboxPolicy_MissingCapability_Error(t *testing.T) {
+func TestValidateCapabilities_MissingCapability_Error(t *testing.T) {
 	m := Manifest{
 		Name:                 "t",
 		Description:          "d",
 		Executable:           "./bin/t",
 		RequiredCapabilities: []string{"file-manager"},
 	}
-	_, err := buildSandboxPolicy(m, newChecker(), "")
-	if err == nil {
+	if err := validateCapabilities(m, newChecker()); err == nil {
 		t.Fatal("expected error for missing required capability")
 	}
 }
@@ -354,8 +340,7 @@ func TestLoadTools_SkipsFiles(t *testing.T) {
 	// Add a valid tool directory.
 	setupTool(t, toolsDir, "real-tool", validManifestJSON("real-tool"))
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, _, err := LoadTools(toolsDir, provider, newCapManager(), "", nil)
+	tools, _, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), nil)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -479,8 +464,7 @@ func TestLoadTools_RequiredEnvVar_Missing_Warning(t *testing.T) {
 	manifest := `{"name":"api-tool","description":"d","version":"1.0.0","executable":"./bin/api-tool","env":[{"name":"API_KEY","required":true,"sensitive":true}]}`
 	setupTool(t, toolsDir, "api-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", solaiconfig.DefaultConfig())
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), solaiconfig.DefaultConfig())
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -498,8 +482,7 @@ func TestLoadTools_RequiredEnvVar_Configured_Loads(t *testing.T) {
 	setupTool(t, toolsDir, "api-tool", manifest)
 
 	cfg := cfgWithToolEnv("api-tool", map[string]string{"API_KEY": "secret"})
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", cfg)
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), cfg)
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}
@@ -516,8 +499,7 @@ func TestLoadTools_OptionalEnvVar_Missing_Loads(t *testing.T) {
 	manifest := `{"name":"opt-tool","description":"d","version":"1.0.0","executable":"./bin/opt-tool","env":[{"name":"OPT_KEY","required":false}]}`
 	setupTool(t, toolsDir, "opt-tool", manifest)
 
-	provider := capability.NewLLMProviderFromMap(nil)
-	tools, warnings, err := LoadTools(toolsDir, provider, newCapManager(), "", solaiconfig.DefaultConfig())
+	tools, warnings, err := LoadTools(toolsDir, unconfiguredProvider(), newCapManager(), solaiconfig.DefaultConfig())
 	if err != nil {
 		t.Fatalf("LoadTools: %v", err)
 	}

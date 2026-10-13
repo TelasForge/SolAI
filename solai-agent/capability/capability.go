@@ -42,6 +42,6 @@ type Capability interface {
 	// Regular capabilities with runtime actions return a non-empty string here;
 	// it is injected into every tool's system prompt so tools know what they
 	// can request. Return "" for capabilities with no runtime-requestable actions
-	// (e.g. capabilities that only affect sandbox setup).
+	// (e.g. capabilities that only affect runtime configuration).
 	ToolRequestDescription() string
 }

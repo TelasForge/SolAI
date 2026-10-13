@@ -26,15 +26,15 @@ var indexURL = "https://raw.githubusercontent.com/melodyogonna/solai/main/regist
 
 // indexEntry is one tool entry from the hosted registry index.
 type indexEntry struct {
-	Latest   string                     `json:"latest"`
-	Versions map[string]indexVersion    `json:"versions"`
+	Latest   string                  `json:"latest"`
+	Versions map[string]indexVersion `json:"versions"`
 }
 
 // indexVersion holds the per-version asset URLs from the registry index.
 type indexVersion struct {
-	Manifest string            `json:"manifest"`
-	Checksums string           `json:"checksums"`
-	Assets   map[string]string `json:"assets"` // "linux/amd64" → download URL
+	Manifest  string            `json:"manifest"`
+	Checksums string            `json:"checksums"`
+	Assets    map[string]string `json:"assets"` // "linux/amd64" → download URL
 }
 
 // indexFile is the top-level structure of registry/index.json.

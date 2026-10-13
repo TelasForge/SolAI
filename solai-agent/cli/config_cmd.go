@@ -19,20 +19,17 @@ var configSetCmd = &cobra.Command{
 	Short: "Set a configuration value",
 	Long: `Set a configuration value in ~/.solai/config.json.
 
-Model (coordinator LLM — pick one):
-  model.provider       Provider for the coordinator: google, openai, or anthropic
-  model.name           Model name (e.g. gemini-2.5-pro, gpt-4o, claude-opus-4-6)
+Model (coordinator LLM):
+  model.name           OpenRouter model slug (e.g. anthropic/claude-sonnet-4, openai/gpt-4o)
 
 Provider credentials (used by coordinator and injected into agentic tools):
-  provider.google      Google AI API key
-  provider.openai      OpenAI API key
-  provider.anthropic   Anthropic API key
+  provider.openrouter  OpenRouter API key
 
 Agent settings:
+  openrouter.base-url  Override the OpenRouter API root (optional)
   user-goals           Goals the agent should pursue autonomously
-  cycle-interval       Duration between agent cycles (e.g. 5m, 1h)
+  cycle-timeout        Duration between agent cycles (e.g. 5m, 1h)
   wallet-seed          BIP39 seed phrase for the agent wallet
-  sandbox.share-net    Allow agent sandbox network access (true/false)
 
 Solana settings:
   solana.rpc-url       Solana RPC endpoint (default: mainnet-beta)
@@ -119,17 +116,13 @@ func runConfigList(cmd *cobra.Command, args []string) error {
 
 	display := map[string]any{
 		"model": map[string]any{
-			"provider": cfg.Model.Provider,
-			"name":     cfg.Model.Name,
+			"name": cfg.Model.Name,
 		},
-		"providers":     providers,
-		"user_goals":    cfg.UserGoals,
-		"cycle_timeout": cfg.CycleTimeout,
-		"wallet_seed":   redact(cfg.WalletSeed),
-		"sandbox": map[string]any{
-			"share_net":   cfg.Sandbox.ShareNet,
-			"extra_binds": cfg.Sandbox.ExtraBinds,
-		},
+		"providers":           providers,
+		"openrouter_base_url": cfg.OpenRouterBaseURL,
+		"user_goals":          cfg.UserGoals,
+		"cycle_timeout":       cfg.CycleTimeout,
+		"wallet_seed":         redact(cfg.WalletSeed),
 		"solana": map[string]any{
 			"rpc_url":    cfg.Solana.RPCURL,
 			"commitment": cfg.Solana.Commitment,

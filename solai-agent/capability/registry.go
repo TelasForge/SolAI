@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	lctools "github.com/tmc/langchaingo/tools"
+	"github.com/melodyogonna/solai/llm"
 )
 
 // Factory is a function that creates a new Capability instance.
@@ -75,22 +75,26 @@ func (m *CapabilityManager) IsRegularCapabilityAvailable(name string) bool {
 	return false
 }
 
-// capabilityTool adapts a Capability to the langchaingo tools.Tool interface
-// so Internal and Regular capabilities can be called by the LLM via the ReAct loop.
+// capabilityTool adapts a Capability to the llm.Tool interface so Internal and
+// Regular capabilities can be called by the LLM via native tool calling.
 type capabilityTool struct{ c Capability }
 
 func (t capabilityTool) Name() string        { return t.c.Name() }
 func (t capabilityTool) Description() string { return t.c.Description() }
-func (t capabilityTool) Call(ctx context.Context, input string) (string, error) {
-	return t.c.Execute(ctx, input)
+func (t capabilityTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	return t.c.Execute(ctx, argsJSON)
 }
 
-// GetAgentTools returns Internal and Regular capabilities wrapped as
-// langchaingo tools so the coordinator's ReAct agent can call them directly.
-// Capabilities with an empty Description are excluded — they are infrastructure
-// concerns (e.g. network-manager) that the LLM does not need to invoke.
-func (m *CapabilityManager) GetAgentTools() []lctools.Tool {
-	var tools []lctools.Tool
+// Parameters advertises an open object schema: capabilities document their
+// argument shape in Description() and parse the raw JSON themselves.
+func (t capabilityTool) Parameters() map[string]any { return llm.OpenObjectSchema() }
+
+// GetAgentTools returns Internal and Regular capabilities wrapped as llm.Tools
+// so the coordinator agent can call them directly. Capabilities with an empty
+// Description are excluded — they are infrastructure concerns (e.g.
+// network-manager) that the LLM does not need to invoke.
+func (m *CapabilityManager) GetAgentTools() []llm.Tool {
+	var tools []llm.Tool
 	for _, c := range m.capabilities {
 		if (c.Class() == Internal || c.Class() == Regular) && c.Description() != "" {
 			tools = append(tools, capabilityTool{c})
@@ -157,4 +161,3 @@ func (m *CapabilityManager) BuildCapabilityPromptSection() string {
 	}
 	return b.String()
 }
-

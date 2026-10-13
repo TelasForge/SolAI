@@ -19,9 +19,6 @@ jobs:
           go-version-file: solai-agent/go.mod
           cache-dependency-path: solai-agent/go.sum
 
-      - name: Fetch bwrap binaries
-        run: go generate ./solai-agent/sandbox/...
-
       - name: Build binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o solai-linux-amd64 ./solai-agent

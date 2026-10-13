@@ -7,21 +7,21 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/solai-agent/capability"
 )
 
 // DefaultToolTimeout is the maximum time a single tool execution may run.
 const DefaultToolTimeout = 2 * time.Minute
 
-// AgenticTool implements langchaingo's tools.Tool interface.
-// Each instance corresponds to one discovered tool directory.
+// AgenticTool implements llm.Tool. Each instance corresponds to one discovered
+// tool directory.
 type AgenticTool struct {
-	manifest      Manifest
-	dir           string
-	timeout       time.Duration
-	llmCfg        *capability.LLMConfig
-	sandboxPolicy SandboxPolicy
-	toolEnv       []string
+	manifest Manifest
+	dir      string
+	timeout  time.Duration
+	llmCfg   *capability.LLMConfig
+	toolEnv  []string
 	// commCap manages per-invocation IPC directories.
 	commCap *capability.CommunicationCapability
 	// autoPayloads holds payload values pre-resolved at construction time
@@ -34,10 +34,10 @@ type AgenticTool struct {
 }
 
 // NewAgenticTool constructs an AgenticTool from a manifest, its directory,
-// an optional LLM config, sandbox policy, resolved env vars, a communication
-// capability for IPC directory management, pre-resolved auto payloads, and a
-// capability section to inject into every tool prompt.
-func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig, policy SandboxPolicy, toolEnv []string, commCap *capability.CommunicationCapability, autoPayloads map[string]string, capabilitySection string) *AgenticTool {
+// an optional LLM config, resolved env vars, a communication capability for
+// IPC directory management, pre-resolved auto payloads, and a capability
+// section to inject into every tool prompt.
+func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig, toolEnv []string, commCap *capability.CommunicationCapability, autoPayloads map[string]string, capabilitySection string) *AgenticTool {
 	timeout := DefaultToolTimeout
 	if manifest.Timeout != "" {
 		if d, err := time.ParseDuration(manifest.Timeout); err == nil && d > 0 {
@@ -49,7 +49,6 @@ func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig,
 		dir:               dir,
 		timeout:           timeout,
 		llmCfg:            llmCfg,
-		sandboxPolicy:     policy,
 		toolEnv:           toolEnv,
 		commCap:           commCap,
 		autoPayloads:      autoPayloads,
@@ -77,10 +76,31 @@ func (t *AgenticTool) Description() string {
 	return desc
 }
 
-// Call implements tools.Tool. It is invoked by langchaingo when the LLM selects
-// this tool during the ReAct loop.
-func (t *AgenticTool) Call(ctx context.Context, input string) (string, error) {
-	taskInput := parseTaskInput(input)
+// Parameters advertises the native tool-call schema: a required "prompt" and
+// an optional string map of payload values.
+func (t *AgenticTool) Parameters() map[string]any {
+	props := map[string]any{
+		"prompt": map[string]any{
+			"type":        "string",
+			"description": "Natural-language instruction describing what the tool should do.",
+		},
+		"payload": map[string]any{
+			"type":                 "object",
+			"description":          "Optional named values the tool needs (see the tool description).",
+			"additionalProperties": map[string]any{"type": "string"},
+		},
+	}
+	return map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"prompt"},
+	}
+}
+
+// Call implements llm.Tool. It is invoked by the agent when the LLM selects
+// this tool during the tool-calling loop. argsJSON is the raw arguments object.
+func (t *AgenticTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	taskInput := parseTaskInput(argsJSON)
 
 	// Append requestable capabilities so the inner tool LLM can generate
 	// capability requests dynamically rather than relying on hardcoded logic.
@@ -111,18 +131,9 @@ func (t *AgenticTool) Call(ctx context.Context, input string) (string, error) {
 	if t.llmCfg != nil {
 		extraEnv = append(extraEnv, t.llmCfg.Env()...)
 	}
+	extraEnv = append(extraEnv, "SOLAI_IPC_DIR="+ipcDir)
 
-	// Set SOLAI_IPC_DIR to the in-process path of the IPC directory.
-	// In the sandbox, the host ipcDir is bind-mounted at /run/solai.
-	policy := t.sandboxPolicy
-	policy.IPCDir = ipcDir
-	if policy.BwrapPath != "" {
-		extraEnv = append(extraEnv, "SOLAI_IPC_DIR=/run/solai")
-	} else {
-		extraEnv = append(extraEnv, "SOLAI_IPC_DIR="+ipcDir)
-	}
-
-	output, err := RunTool(ctx, t.dir, t.manifest.Executable, taskInput, t.timeout, extraEnv, policy)
+	output, err := RunTool(ctx, t.dir, t.manifest.Executable, taskInput, t.timeout, extraEnv, ipcDir)
 	if err != nil {
 		slog.Error("tool infrastructure error", "tool", t.manifest.Name, "err", err)
 		msg := fmt.Sprintf("Tool infrastructure error: %v", err)
@@ -147,3 +158,5 @@ func (t *AgenticTool) Call(ctx context.Context, input string) (string, error) {
 	slog.Debug("tool success payload", "tool", t.manifest.Name, "payload", string(output.Payload))
 	return string(output.Payload), nil
 }
+
+var _ llm.Tool = (*AgenticTool)(nil)

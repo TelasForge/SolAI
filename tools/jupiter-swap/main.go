@@ -15,10 +15,8 @@ import (
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/ratelimit"
-	"github.com/tmc/langchaingo/agents"
-	"github.com/tmc/langchaingo/chains"
-	lctools "github.com/tmc/langchaingo/tools"
 )
 
 const (
@@ -68,8 +66,26 @@ Input JSON: {"inputMint":"<mint>","outputMint":"<mint>","amount":<integer_base_u
 Returns: quote with expected output amount, price impact, and route details.`
 }
 
-func (t *jupiterQuoteTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
+func (t *jupiterQuoteTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"inputMint":   map[string]any{"type": "string", "description": "Input token mint address."},
+			"outputMint":  map[string]any{"type": "string", "description": "Output token mint address."},
+			"amount":      map[string]any{"type": "integer", "description": "Amount in the input token's smallest unit (lamports for SOL)."},
+			"slippageBps": map[string]any{"type": "integer", "description": "Optional slippage in basis points (default 50)."},
+		},
+		"required": []string{"inputMint", "outputMint", "amount"},
+	}
+}
+
+func (t *jupiterQuoteTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := argsJSON
+	// Accept both a direct argument object and {"input":"<json string>"}.
+	if s := llm.ArgString(argsJSON, "input"); s != "" && json.Valid([]byte(s)) {
+		input = s
+	}
 	input = stripMarkdownFence(input)
 	var req struct {
 		InputMint   string `json:"inputMint"`
@@ -118,8 +134,16 @@ Returns JSON with "swapTransaction" field containing a base64-encoded unsigned t
 The coordinator will sign and submit this transaction via the Solana capability.`
 }
 
-func (t *jupiterSwapTxTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input_len", len(input))
+func (t *jupiterSwapTxTool) Parameters() map[string]any {
+	return llm.StringSchema(`The complete JSON response from jupiter-quote, passed verbatim.`)
+}
+
+func (t *jupiterSwapTxTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input_len", len(argsJSON))
+	input := llm.ArgString(argsJSON, "input")
+	if input == "" {
+		input = argsJSON
+	}
 	input = stripMarkdownFence(input)
 	if t.walletAddress == "" {
 		return "", fmt.Errorf("wallet address not available — cannot build swap transaction")
@@ -202,24 +226,22 @@ func main() {
 	quoteURL, swapURL := jupiterBaseURLs()
 
 	slog.Info("starting agent")
-	llm, err := newLLM(ctx)
+	client, err := llm.FromEnv()
 	if err != nil {
 		slog.Error("llm init failed", "error", err)
 		writeError(fmt.Sprintf("LLM initialisation failed: %v", err))
 		return
 	}
-	slog.Info("llm initialised")
+	slog.Info("llm initialised", "model", client.Model())
 
 	limiter := newJupiterLimiter()
-	tools := []lctools.Tool{
+	tools := []llm.Tool{
 		&jupiterQuoteTool{limiter: limiter, quoteURL: quoteURL},
 		&jupiterSwapTxTool{limiter: limiter, swapURL: swapURL, walletAddress: walletAddress},
 	}
-	agentInst := agents.NewOneShotAgent(llm, tools,
-		agents.WithMaxIterations(6),
-		agents.WithPromptPrefix(buildSystemPrompt(walletAddress)),
+	agentInst := llm.NewAgent(client, tools, buildSystemPrompt(walletAddress),
+		llm.WithMaxIterations(6),
 	)
-	executor := agents.NewExecutor(agentInst)
 
 	prompt := input.Prompt
 	if len(input.Payload) > 0 {
@@ -230,23 +252,11 @@ func main() {
 	}
 
 	slog.Info("agent starting", "prompt", prompt)
-	result, err := chains.Run(ctx, executor, prompt)
+	result, _, err := agentInst.Run(ctx, prompt, nil)
 	if err != nil {
-		const parsePrefix = "unable to parse agent output: "
-		if i := strings.Index(err.Error(), parsePrefix); i >= 0 {
-			extracted := err.Error()[i+len(parsePrefix):]
-			if strings.HasPrefix(extracted, "Thought:") {
-				slog.Error("agent failed", "error", err)
-				writeError(fmt.Sprintf("agent run failed: %v", err))
-				return
-			}
-			slog.Warn("agent parse error recovered", "extracted_len", len(extracted))
-			result = extracted
-		} else {
-			slog.Error("agent failed", "error", err)
-			writeError(fmt.Sprintf("agent run failed: %v", err))
-			return
-		}
+		slog.Error("agent failed", "error", err)
+		writeError(fmt.Sprintf("agent run failed: %v", err))
+		return
 	}
 
 	// Check if the agent's Final Answer is a capability request JSON.

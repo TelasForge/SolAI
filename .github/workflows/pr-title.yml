@@ -19,7 +19,7 @@ jobs:
             echo ""
             echo "Required format: [Package] Title"
             echo "Examples:"
-            echo "  [Solai] Add sandbox support"
+            echo "  [Solai] Add OpenRouter support"
             echo "  [Token-price] Fix price fetching for BONK"
             echo ""
             echo "Rules:"

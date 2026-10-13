@@ -15,10 +15,8 @@ import (
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/ratelimit"
-	"github.com/tmc/langchaingo/agents"
-	"github.com/tmc/langchaingo/chains"
-	lctools "github.com/tmc/langchaingo/tools"
 )
 
 var knownTokens = map[string]string{
@@ -67,9 +65,12 @@ Returns JSON with price_usd and change_24h_pct. Best for accurate prices of well
 	)
 }
 
-func (t *jupiterTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
-	input = stripMarkdownFence(input)
+func (t *jupiterTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := llm.ArgString(argsJSON, "input")
+	if input == "" {
+		input = stripMarkdownFence(argsJSON)
+	}
 	mints := resolveToMints(parseTokenList(input))
 	if len(mints) == 0 {
 		return "", fmt.Errorf("no recognised token symbols or mint addresses in: %q", input)
@@ -92,6 +93,10 @@ func (t *jupiterTool) Call(ctx context.Context, input string) (string, error) {
 
 type dexSearchTool struct{}
 
+func (t *jupiterTool) Parameters() map[string]any {
+	return llm.StringSchema(`Comma-separated token symbols (e.g. "SOL,USDC,JUP") or raw mint addresses.`)
+}
+
 func (t *dexSearchTool) Name() string { return "dexscreener-search" }
 
 func (t *dexSearchTool) Description() string {
@@ -101,9 +106,12 @@ Returns top Solana pairs with price, 24h volume, liquidity, and price change.
 Best for discovering tokens, finding new/unknown tokens, or market discovery.`
 }
 
-func (t *dexSearchTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
-	input = strings.TrimSpace(stripMarkdownFence(input))
+func (t *dexSearchTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := strings.TrimSpace(llm.ArgString(argsJSON, "input"))
+	if input == "" {
+		input = strings.TrimSpace(stripMarkdownFence(argsJSON))
+	}
 	// If LLM passed JSON like {"query":"..."} or {"q":"..."}, extract the value.
 	var obj map[string]string
 	if json.Unmarshal([]byte(input), &obj) == nil {
@@ -131,6 +139,10 @@ func (t *dexSearchTool) Call(ctx context.Context, input string) (string, error) 
 	return string(data), nil
 }
 
+func (t *dexSearchTool) Parameters() map[string]any {
+	return llm.StringSchema(`A search query (e.g. "BONK", "dogwifhat", "meme coin").`)
+}
+
 // ---- DexScreener token tool -------------------------------------------------
 
 type dexTokenTool struct{}
@@ -144,8 +156,12 @@ Returns pools, price, volume, and liquidity across all DEXes for those tokens.
 Best when you already have a mint address and need pool-level market detail.`
 }
 
-func (t *dexTokenTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
+func (t *dexTokenTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := llm.ArgString(argsJSON, "input")
+	if input == "" {
+		input = argsJSON
+	}
 	parts := parseTokenList(stripMarkdownFence(input))
 	var addresses []string
 	for _, p := range parts {
@@ -174,6 +190,10 @@ func (t *dexTokenTool) Call(ctx context.Context, input string) (string, error) {
 	return string(data), nil
 }
 
+func (t *dexTokenTool) Parameters() map[string]any {
+	return llm.StringSchema(`Comma-separated mint addresses (max 10).`)
+}
+
 // ---- main -------------------------------------------------------------------
 
 func main() {
@@ -200,24 +220,22 @@ func main() {
 
 	ctx := context.Background()
 
-	llm, err := newLLM(ctx)
+	client, err := llm.FromEnv()
 	if err != nil {
 		slog.Error("llm init failed", "error", err)
 		writeError(fmt.Sprintf("LLM initialisation failed: %v", err))
 		return
 	}
-	slog.Info("llm initialised")
+	slog.Info("llm initialised", "model", client.Model())
 
-	tools := []lctools.Tool{
+	tools := []llm.Tool{
 		&jupiterTool{limiter: newJupiterLimiter()},
 		&dexSearchTool{},
 		&dexTokenTool{},
 	}
-	agent := agents.NewOneShotAgent(llm, tools,
-		agents.WithMaxIterations(8),
-		agents.WithPromptPrefix(agentSystemPrompt),
+	agentInst := llm.NewAgent(client, tools, agentSystemPrompt,
+		llm.WithMaxIterations(8),
 	)
-	executor := agents.NewExecutor(agent)
 
 	prompt := input.Prompt
 	if len(input.Payload) > 0 {
@@ -228,26 +246,11 @@ func main() {
 	}
 
 	slog.Info("agent starting", "prompt", prompt)
-	result, err := chains.Run(ctx, executor, prompt)
+	result, _, err := agentInst.Run(ctx, prompt, nil)
 	if err != nil {
-		// langchaingo's OneShotAgent wraps the raw LLM output in a parse error
-		// when the model responds without the expected ReAct format. Recover by
-		// extracting the actual output so the coordinator still gets a result.
-		const parsePrefix = "unable to parse agent output: "
-		if i := strings.Index(err.Error(), parsePrefix); i >= 0 {
-			extracted := err.Error()[i+len(parsePrefix):]
-			if strings.HasPrefix(extracted, "Thought:") {
-				slog.Error("agent failed", "error", err)
-				writeError(fmt.Sprintf("agent run failed: %v", err))
-				return
-			}
-			slog.Warn("agent parse error recovered", "extracted_len", len(extracted))
-			result = extracted
-		} else {
-			slog.Error("agent failed", "error", err)
-			writeError(fmt.Sprintf("agent run failed: %v", err))
-			return
-		}
+		slog.Error("agent failed", "error", err)
+		writeError(fmt.Sprintf("agent run failed: %v", err))
+		return
 	}
 
 	slog.Info("agent completed")

@@ -2,7 +2,7 @@
 
 ## Overview
 
-An autonomous AI agent that interacts with the Solana blockchain. Built in Go using [langchaingo](https://tmc.github.io/langchaingo/docs/) with a user-configured LLM as the reasoning engine (Google, OpenAI, or Anthropic). The agent runs in a continuous loop, coordinating a suite of user-installed agentic tools to accomplish user-defined goals. If a goal cannot be accomplished with available tools, the agent reports this rather than hallucinating actions.
+An autonomous AI agent that interacts with the Solana blockchain. Built in Go with a small dependency-free client for the [OpenRouter](https://openrouter.ai) Chat Completions API and native function/tool calling as the reasoning engine — no LLM framework. OpenRouter unifies access to Google, OpenAI, Anthropic, and other models behind a single key and model slug. The agent runs in a continuous loop, coordinating a suite of user-installed agentic tools to accomplish user-defined goals. If a goal cannot be accomplished with available tools, the agent reports this rather than hallucinating actions.
 
 ![Solai Architecture diagram](https://res.cloudinary.com/melodyogonna/image/upload/v1773001206/solai-architecture_cqawjr.png)
 _Original architecture diagram. Some details have changed in the implementation but the core vision is the same_
@@ -13,8 +13,8 @@ _Original architecture diagram. Some details have changed in the implementation 
 
 - **Hierarchical multi-agent system.** SolAI is a coordinator agent that delegates to subagents. Each agentic tool is itself an LLM agent — it receives a prompt from the main agent, reasons about it using its own LLM, calls the specific capability it wraps (an API, an RPC endpoint, a smart contract), and returns a structured result.
 - **The coordinator plans; subagents execute.** The main agent never calls external APIs or executes transactions directly. It decomposes goals into prompts and dispatches them to the appropriate subagent tools.
-- **Two-layer memory across cycles.** A new coordinator agent instance is created each cycle, but state is carried forward via two mechanisms: (1) a shared `ConversationWindowBuffer` passed to each executor — `chains.Call` automatically saves and loads the last 3 cycles' conversation; (2) an explicit `memory` capability tool the LLM calls to persist structured state (current plan, observations, pending tasks). Together they allow multi-cycle strategies without unbounded context growth.
-- **Sandboxed by default.** Both the coordinator and each subagent tool run in isolated bubblewrap (bwrap) sandboxes. Capabilities explicitly widen what is allowed.
+- **Two-layer memory across cycles.** A new agent run is started each cycle, but state is carried forward via two mechanisms: (1) the recent conversation history is passed into each cycle's `llm.Agent.Run` and trimmed on user-turn boundaries (`llm.TrimHistory`); (2) an explicit `memory` capability tool the LLM calls to persist structured state (current plan, observations, pending tasks). Together they allow multi-cycle strategies without unbounded context growth.
+- **Native tool calling.** Tools are advertised as JSON-schema function definitions; the model returns structured `tool_calls` rather than ReAct-formatted text. This removes the fragile text parsing (and the associated recovery hacks) required by the previous implementation.
 - **Tools as plugins.** Agentic tools are packaged and distributed as GitHub releases, installable via `solai install`. No code changes to the agent are required to add a tool.
 
 ---
@@ -24,21 +24,9 @@ _Original architecture diagram. Some details have changed in the implementation 
 ```
 solai start
   └─ Load ~/.solai/config.json
-  └─ Validate: api_key and user_goals must be set
-  └─ Extract embedded bwrap binary → /tmp/bwrap-*
-  └─ Launch agent sandbox:
-       bwrap --unshare-all [--share-net]
-         --ro-bind ~/.solai/config.json  /etc/solai/config.json
-         --ro-bind ~/.solai/tools        /tools
-         --ro-bind <solai-binary>        /solai
-         --proc /proc --dev /dev --tmpfs /tmp
-         --die-with-parent
-         -- /solai __agent-run
-
-__agent-run (inside sandbox)
-  └─ Read config from /etc/solai/config.json
-  └─ Init LLM from cfg.Model (provider + name, key from cfg.Providers)
-  └─ Register capabilities: wallet, network-manager
+  └─ Validate: model.name, provider.openrouter, and user_goals must be set
+  └─ Build OpenRouter client (llm.NewClient)
+  └─ Register capabilities: communication, wallet, solana, network-manager, memory
   └─ agent.Run(ctx, cfg, capManager)
 ```
 
@@ -50,24 +38,23 @@ Cycles run back-to-back with no sleep between them. Each cycle has a `cycle_time
 
 ```
 SystemManager.Setup()
-  └─ Extract bwrap for subagent sandboxing (into /tmp inside agent sandbox)
-  └─ Discover tools from /tools/ — load manifests, validate capabilities
-  └─ Log configured LLM providers
+  └─ Discover tools from ~/.solai/tools/ — load manifests, validate capabilities
+  └─ Log configured LLM provider
 
 buildCyclePrompt()   [rebuilt every cycle]
-  └─ ## Available Tools — capabilities with non-empty Description + agentic tools
   └─ ## Agent Memory — injected from MemoryCapability.BuildMemorySection() if non-empty
   └─ ## Your Goals — user goals from config
+  (tool definitions are advertised natively via the function-calling API)
 
-runCycle()  [OneShotAgent, max 10 iterations, exponential retry up to 3×]
-  └─ ReAct: Reason → pick subagent → formulate prompt → Act → Observe result → repeat
-  └─ Each "Act" spawns a subagent process:
+runCycle()  [llm.Agent, max 10 tool-calling iterations, exponential retry up to 3×]
+  └─ Model returns structured tool_calls; the agent executes each and feeds results back
+  └─ Each tool call to an agentic tool spawns a subagent process:
        allocates temp IPC dir; writes input.json (prompt + payload map, with auto-injected values merged in)
        appends Requestable Capabilities section to tool prompt so inner LLM can compose capability requests
        runs tool; on "request" output: coordinator LLM reads instruction and acts accordingly (typically calls capability, re-invokes tool with result in payload)
        reads final {"type":"success"|"error",...} from output.json
   └─ On transient error (e.g. LLM rate limit): retry with 2s→30s exponential backoff
-  └─ On ErrNotFinished: log warning, no retry, continue to next cycle
+  └─ On llm.ErrMaxIterations: log warning, no retry, continue to next cycle
   └─ On cycle_timeout: log warning, continue to next cycle
 ```
 
@@ -98,7 +85,7 @@ Agentic tools are standalone executables (any language) distributed as GitHub re
 
 The coordinator communicates with each subagent via **file-based JSON IPC**. Before spawning the tool, the coordinator allocates a temporary directory (`$SOLAI_IPC_DIR`) and writes `input.json` there. The tool reads `$SOLAI_IPC_DIR/input.json` on startup, does its work, writes `$SOLAI_IPC_DIR/output.json`, and exits. The coordinator reads the output after the process terminates.
 
-Inside the sandbox `$SOLAI_IPC_DIR` is bind-mounted at `/run/solai`; outside it is the host temp path.
+`$SOLAI_IPC_DIR` is a host temporary directory unique to each invocation.
 
 **`input.json`** (coordinator → subagent):
 ```json
@@ -119,7 +106,7 @@ The coordinator also appends a `## Requestable Capabilities` section to every to
 { "type": "request", "payload": { "capability": "<name>", "action": "<action>", "input": "<value>", "instruction": "<natural language for the coordinator>" } }
 ```
 
-`success` and `error` are terminal — the coordinator reads them and returns the result to its ReAct loop. `request` is a capability request: the tool writes it and exits immediately (no blocking). The coordinator LLM reads the `instruction` field (natural language composed by the inner tool LLM) and follows it — the instruction may say to re-invoke the tool with the result in `payload`, call another capability first, or anything else. No re-invocation logic is hardcoded in infrastructure.
+`success` and `error` are terminal — the coordinator reads them and returns the result to its tool-calling loop. `request` is a capability request: the tool writes it and exits immediately (no blocking). The coordinator LLM reads the `instruction` field (natural language composed by the inner tool LLM) and follows it — the instruction may say to re-invoke the tool with the result in `payload`, call another capability first, or anything else. No re-invocation logic is hardcoded in infrastructure.
 
 **Capability request / re-invocation flow:**
 
@@ -130,18 +117,9 @@ When the coordinator observes a `request` output:
 
 Only `Regular` capabilities are requestable this way — `Core` and `Internal` capabilities are not accessible to tools.
 
-### Tool sandbox (nested bwrap)
+### Tool execution
 
-Each tool subprocess runs in its own bwrap instance inside the agent sandbox (nested unprivileged namespaces, supported on Linux 5.x+):
-
-```
-bwrap --unshare-all
-  --ro-bind /tools/<name>  /app
-  --tmpfs /tmp --proc /proc --dev /dev
-  --die-with-parent
-  [--share-net]   ← only if "network-manager" in required_capabilities
-  -- /app/<name>
-```
+Tools run as ordinary child processes. The coordinator sets `cmd.Dir` to the tool directory, resolves the executable to an absolute path, and injects the resolved env (LLM credentials, `SOLAI_IPC_DIR`, and any `tool-env.*` values). There is no OS-level sandbox; the `required_capabilities` field is validated against the registered capabilities but grants no permissions.
 
 ### Tool manifest format
 
@@ -161,10 +139,10 @@ bwrap --unshare-all
     { "name": "SOME_BASE_URL", "sensitive": false, "required": false }
   ],
   "llm_options": {
-    "primary": "gemini-2.5-pro",
+    "primary": "anthropic/claude-sonnet-4",
     "supported": [
-      { "model": "gemini-2.5-pro", "provider": "google" },
-      { "model": "gpt-4o",         "provider": "openai" }
+      { "model": "anthropic/claude-sonnet-4" },
+      { "model": "openai/gpt-4o" }
     ]
   }
 }
@@ -175,7 +153,7 @@ bwrap --unshare-all
 - `description`: shown to the coordinator LLM as part of the tool's description (so it knows what to supply on re-invocation)
 - `source` (optional): a capability name — if set, the coordinator resolves the value automatically at load time by calling that capability (e.g. `"wallet"` → wallet address). No LLM involvement for sourced entries.
 
-`llm_options` is required for any tool that uses an internal LLM agent (which is the expected pattern). The coordinator resolves credentials from `config.providers` and injects `SOLAI_LLM_PROVIDER`, `SOLAI_LLM_MODEL`, and `SOLAI_LLM_API_KEY` into the subagent's environment. Tools that are purely deterministic (no reasoning required) may omit `llm_options`.
+`llm_options` is required for any tool that uses an internal LLM agent (which is the expected pattern). Each entry is an OpenRouter model slug (`vendor/model`); the `primary` model is preferred, with the `supported` list as fallback order. The coordinator injects `SOLAI_LLM_MODEL`, `SOLAI_LLM_API_KEY`, and (optionally) `SOLAI_LLM_BASE_URL` into the subagent's environment. Tools that are purely deterministic (no reasoning required) may omit `llm_options`.
 
 `env` declares runtime variables the tool needs. Values are set via `solai config set tool-env.<tool>.<VAR> <value>` and injected into the tool's environment at runtime. `sensitive: true` causes the value to be redacted in `config list` output. `required: true` causes the agent to refuse to load the tool if the value is missing.
 
@@ -218,7 +196,7 @@ Capabilities are system-level features registered at startup. They run inside th
 
 The distinction between `Internal` and `Regular` is intentional: some capabilities (e.g. Solana RPC) hold private keys and should only be callable by the trusted coordinator LLM. Others (e.g. wallet signing) are safe to expose to tools under the coordinator's supervision — the coordinator LLM reviews each tool invocation before it runs.
 
-A `Regular` capability may also have no runtime actions (e.g. `network-manager`) — in that case `ToolRequestDescription()` returns empty and no request docs are generated, but the capability still appears in the coordinator prompt and grants sandbox permissions.
+A `Regular` capability may also have no runtime actions (e.g. `network-manager`) — in that case `ToolRequestDescription()` returns empty and no request docs are generated, but the capability still appears in the coordinator prompt and validates tool manifests that declare it.
 
 Capabilities with an empty `Description()` (e.g. `network-manager`) are excluded from both the coordinator's tool list and the `## Available Tools` prompt section. This prevents infrastructure-only capabilities from confusing the LLM with misleading action suggestions.
 
@@ -226,17 +204,17 @@ Capabilities with an empty `Description()` (e.g. `network-manager`) are excluded
 
 | Name | Class | Effect |
 |---|---|---|
-| `system-manager` | Core | Owns tool loading, LLM provider logging, cleanup jobs, sandbox extraction |
+| `system-manager` | Core | Owns tool loading, LLM provider logging, cleanup jobs |
 | `wallet` | Regular | Derives ed25519 keypair from BIP39 seed; provides `address` and `sign` actions requestable by tools; coordinator can also call it directly |
-| `network-manager` | Regular | Grants `--share-net` to tool sandboxes that declare it; no runtime request actions |
+| `network-manager` | Regular | Declarative marker for tools that use outbound network access; no runtime request actions |
 | `solana` | Regular | Solana RPC access (balance, transfer, blockhash, send_transaction, account_info); callable by the coordinator LLM directly, and requestable by agentic tools via the capability request protocol (e.g. for transaction signing and submission) |
-| `memory` | Internal | Two-layer cross-cycle state: (a) `ConversationWindowBuffer` (last 3 cycles, automatic via langchaingo); (b) structured plan/observation/task store callable by coordinator LLM |
+| `memory` | Internal | Two-layer cross-cycle state: (a) trimmed conversation history (last few user turns, automatic); (b) structured plan/observation/task store callable by coordinator LLM |
 
 ### Planned capabilities
 
 | Name | Class | Effect |
 |---|---|---|
-| `file-manager` | Regular | Bind-mounts user-configured paths into tool sandboxes |
+| `file-manager` | Regular | Grants tools access to user-configured paths (not yet implemented) |
 | `web-ui` | Internal | Web interface for configuring agent and tools |
 
 ---
@@ -248,21 +226,15 @@ Stored in `~/.solai/config.json`. Managed via `solai config set/get/list`.
 ```json
 {
   "model": {
-    "provider": "google",
-    "name": "gemini-2.5-pro"
+    "name": "anthropic/claude-sonnet-4"
   },
   "providers": {
-    "google": "",
-    "openai": "",
-    "anthropic": ""
+    "openrouter": ""
   },
+  "openrouter_base_url": "",
   "wallet_seed": "",
   "cycle_timeout": "5m",
   "user_goals": "",
-  "sandbox": {
-    "share_net": true,
-    "extra_binds": []
-  },
   "tool_env": {
     "<tool-name>": {
       "VAR_NAME": "value"
@@ -271,15 +243,14 @@ Stored in `~/.solai/config.json`. Managed via `solai config set/get/list`.
 }
 ```
 
-`model` selects the coordinator's LLM. At least one provider credential must be set, and it must match `model.provider`.
+`model.name` selects the coordinator's LLM as an OpenRouter model slug. `providers.openrouter` holds the API key shared by the coordinator and every agentic tool; `openrouter_base_url` optionally overrides the API root.
 
-`providers` holds credentials for all configured providers. The coordinator uses `providers[model.provider]`. Agentic tools draw from this map independently — a tool whose `llm_options.primary` is `openai` will use `providers.openai` even if the coordinator is configured for Google. This lets the coordinator and tools use different models.
+Because OpenRouter fronts every vendor, there is a single credential. The coordinator and tools may still use different models by setting different slugs — a tool whose `llm_options.primary` is `openai/gpt-4o` uses that model with the same key.
 
 `cycle_timeout` caps the duration of a single coordinator cycle (default 5m). There is no sleep between cycles.
 
 `tool_env` holds per-tool runtime variables declared in the tool's `env` manifest field. Set via `solai config set tool-env.<tool>.<VAR> <value>`. Sensitive values are redacted in `config list`.
 
-`sandbox.extra_binds` accepts `[{"path": "/host/path", "read_only": true}]` entries that are bind-mounted into the agent sandbox (not tool sandboxes — use `file-manager` for that).
 
 ---
 
@@ -287,6 +258,7 @@ Stored in `~/.solai/config.json`. Managed via `solai config set/get/list`.
 
 | Module | Purpose |
 |---|---|
+| `llm` | Dependency-free OpenRouter Chat Completions client (`Client`) plus a native tool-calling agent loop (`Agent`). Shared by the coordinator and every agentic tool. |
 | `ratelimit` | `RateLimitStrategy` and `RetryStrategy` interfaces + implementations. Used by the agent (exponential retry on LLM calls) and by tools (fixed-window rate limiting for external APIs). |
 
 ### Implementations
@@ -302,6 +274,5 @@ Stored in `~/.solai/config.json`. Managed via `solai config set/get/list`.
 
 | Feature | Notes |
 |---|---|
-| File manager capability | `FSBinds` field exists in `SandboxPolicy`; no capability wires it up yet |
 | Web UI | Planned long-term; listed as an Internal capability |
-| LLM env vars in sandboxed agent | Provider keys from `config.providers` are available to tools but not currently forwarded as env vars into the outer agent sandbox itself |
+| Tool isolation | Tools currently run as ordinary subprocesses; OS-level sandboxing may be reintroduced later as an opt-in |

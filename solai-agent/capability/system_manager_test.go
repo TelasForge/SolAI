@@ -7,20 +7,20 @@ import (
 	"testing"
 	"time"
 
-	lctools "github.com/tmc/langchaingo/tools"
+	"github.com/melodyogonna/solai/llm"
 )
 
-// stubTool implements lctools.Tool for testing.
+// stubTool implements llm.Tool for testing.
 type stubTool struct{ name string }
 
-func (s *stubTool) Name() string                                      { return s.name }
-func (s *stubTool) Description() string                               { return s.name }
+func (s *stubTool) Name() string                                     { return s.name }
+func (s *stubTool) Description() string                              { return s.name }
 func (s *stubTool) Call(_ context.Context, _ string) (string, error) { return "", nil }
 
 // ---- Name / Class / Description ---------------------------------------------
 
 func TestSystemManager_Metadata(t *testing.T) {
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(nil, NewLLMProvider("", ""))
 	if sm.Name() != "system-manager" {
 		t.Errorf("Name: got %q, want %q", sm.Name(), "system-manager")
 	}
@@ -32,15 +32,6 @@ func TestSystemManager_Metadata(t *testing.T) {
 	}
 }
 
-// ---- BwrapPath --------------------------------------------------------------
-
-func TestSystemManager_BwrapPathInitiallyEmpty(t *testing.T) {
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
-	if sm.BwrapPath() != "" {
-		t.Errorf("expected empty bwrap path before Setup, got %q", sm.BwrapPath())
-	}
-}
-
 // ---- GetTools panics before Setup -------------------------------------------
 
 func TestGetTools_PanicsIfSetupNotCalled(t *testing.T) {
@@ -49,14 +40,14 @@ func TestGetTools_PanicsIfSetupNotCalled(t *testing.T) {
 			t.Error("expected panic when GetTools called before Setup")
 		}
 	}()
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(nil, NewLLMProvider("", ""))
 	sm.GetTools() // must panic
 }
 
 // ---- Execute ----------------------------------------------------------------
 
 func TestExecute_BeforeSetup_ReturnsEmptyTools(t *testing.T) {
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(nil, NewLLMProvider("", ""))
 	result, err := sm.Execute(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -71,18 +62,16 @@ func TestExecute_BeforeSetup_ReturnsEmptyTools(t *testing.T) {
 }
 
 func TestExecute_AfterSetup_ReflectsLoadedTools(t *testing.T) {
-	tools := []lctools.Tool{
+	tools := []llm.Tool{
 		&stubTool{name: "tool-a"},
 		&stubTool{name: "tool-b"},
 	}
-	loader := func(_ string, _ *CapabilityManager) ([]lctools.Tool, []error, error) {
+	loader := func(_ *CapabilityManager) ([]llm.Tool, []error, error) {
 		return tools, nil, nil
 	}
-	sm := NewSystemManager(loader, NewLLMProviderFromMap(nil))
-	_, err := sm.Setup(SetUp(nil))
-	if err != nil {
-		// Setup may fail due to sandbox extraction; that's acceptable in tests.
-		t.Logf("Setup warning (sandbox unavailable): %v", err)
+	sm := NewSystemManager(loader, NewLLMProvider("", ""))
+	if _, err := sm.Setup(SetUp(nil)); err != nil {
+		t.Fatalf("Setup: %v", err)
 	}
 
 	result, err := sm.Execute(context.Background(), "")
@@ -98,33 +87,13 @@ func TestExecute_AfterSetup_ReflectsLoadedTools(t *testing.T) {
 	}
 }
 
-func TestExecute_SandboxAvailableField(t *testing.T) {
-	sm := NewSystemManager(
-		func(_ string, _ *CapabilityManager) ([]lctools.Tool, []error, error) {
-			return nil, nil, nil
-		},
-		NewLLMProviderFromMap(nil),
-	)
-	result, err := sm.Execute(context.Background(), "")
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	var status map[string]any
-	if err := json.Unmarshal([]byte(result), &status); err != nil {
-		t.Fatalf("not valid JSON: %v", err)
-	}
-	if _, ok := status["sandbox_available"]; !ok {
-		t.Error("expected sandbox_available field in Execute output")
-	}
-}
-
 // ---- Setup ------------------------------------------------------------------
 
 func TestSetup_LoaderFatalError_Propagated(t *testing.T) {
-	loader := func(_ string, _ *CapabilityManager) ([]lctools.Tool, []error, error) {
+	loader := func(_ *CapabilityManager) ([]llm.Tool, []error, error) {
 		return nil, nil, errors.New("fatal loader error")
 	}
-	sm := NewSystemManager(loader, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(loader, NewLLMProvider("", ""))
 	_, err := sm.Setup(SetUp(nil))
 	if err == nil {
 		t.Fatal("expected fatal error from loader to be propagated")
@@ -132,14 +101,13 @@ func TestSetup_LoaderFatalError_Propagated(t *testing.T) {
 }
 
 func TestSetup_LoaderWarnings_Returned(t *testing.T) {
-	loader := func(_ string, _ *CapabilityManager) ([]lctools.Tool, []error, error) {
+	loader := func(_ *CapabilityManager) ([]llm.Tool, []error, error) {
 		return nil, []error{errors.New("tool-x disabled")}, nil
 	}
-	sm := NewSystemManager(loader, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(loader, NewLLMProvider("", ""))
 	warnings, err := sm.Setup(SetUp(nil))
 	if err != nil {
-		t.Logf("Setup error (may be sandbox): %v", err)
-		return
+		t.Fatalf("Setup: %v", err)
 	}
 	if len(warnings) != 1 {
 		t.Errorf("expected 1 warning, got %d", len(warnings))
@@ -147,13 +115,13 @@ func TestSetup_LoaderWarnings_Returned(t *testing.T) {
 }
 
 func TestSetup_GetToolsAfterSetup(t *testing.T) {
-	expected := []lctools.Tool{&stubTool{name: "my-tool"}}
-	loader := func(_ string, _ *CapabilityManager) ([]lctools.Tool, []error, error) {
+	expected := []llm.Tool{&stubTool{name: "my-tool"}}
+	loader := func(_ *CapabilityManager) ([]llm.Tool, []error, error) {
 		return expected, nil, nil
 	}
-	sm := NewSystemManager(loader, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(loader, NewLLMProvider("", ""))
 	if _, err := sm.Setup(SetUp(nil)); err != nil {
-		t.Logf("Setup error (may be sandbox): %v", err)
+		t.Fatalf("Setup: %v", err)
 	}
 	tools := sm.GetTools()
 	if len(tools) != len(expected) {
@@ -164,7 +132,7 @@ func TestSetup_GetToolsAfterSetup(t *testing.T) {
 // ---- RegisterJob / Start ----------------------------------------------------
 
 func TestRegisterJob_RunsOnTick(t *testing.T) {
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(nil, NewLLMProvider("", ""))
 
 	ran := make(chan struct{}, 1)
 	sm.RegisterJob(CleanupJob{
@@ -193,7 +161,7 @@ func TestRegisterJob_RunsOnTick(t *testing.T) {
 }
 
 func TestRegisterJob_StopsOnContextCancel(t *testing.T) {
-	sm := NewSystemManager(nil, NewLLMProviderFromMap(nil))
+	sm := NewSystemManager(nil, NewLLMProvider("", ""))
 
 	count := 0
 	sm.RegisterJob(CleanupJob{

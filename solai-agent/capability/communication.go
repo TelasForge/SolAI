@@ -11,9 +11,8 @@ import (
 //
 // Before starting a tool, the coordinator calls Allocate to create a fresh IPC
 // directory, writes input.json into it, and injects SOLAI_IPC_DIR pointing at
-// the directory (host path for unsandboxed tools, /run/solai inside bwrap).
-// After the tool process exits, the coordinator reads output.json from the
-// directory and calls Release to clean up.
+// the directory. After the tool process exits, the coordinator reads output.json
+// from the directory and calls Release to clean up.
 type CommunicationCapability struct{}
 
 // NewCommunicationCapability creates a CommunicationCapability.

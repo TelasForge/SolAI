@@ -37,8 +37,8 @@ func NewMemoryCapability() *MemoryCapability {
 	return &MemoryCapability{}
 }
 
-func (m *MemoryCapability) Name() string  { return "memory" }
-func (m *MemoryCapability) Class() CapabilityClass { return Internal }
+func (m *MemoryCapability) Name() string                   { return "memory" }
+func (m *MemoryCapability) Class() CapabilityClass         { return Internal }
 func (m *MemoryCapability) ToolRequestDescription() string { return "" }
 
 func (m *MemoryCapability) Description() string {

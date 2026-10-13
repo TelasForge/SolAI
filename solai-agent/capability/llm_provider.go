@@ -1,141 +1,112 @@
 package capability
 
 import (
-	"fmt"
-	"os"
 	"strings"
 )
 
-// knownProviders is the list of LLM providers whose credentials are read from env.
-// To add a new provider, append its lowercase name here.
-var knownProviders = []string{"google", "openai", "anthropic"}
-
-// LLMModelOption carries the data LLMProvider needs to resolve credentials.
-// Defined here (not in tool/) to keep the dependency one-way: tool → capability.
+// LLMModelOption is one model entry declared by a tool's manifest.
 type LLMModelOption struct {
-	Model    string
-	Provider string
+	// Model is an OpenRouter model slug, e.g. "anthropic/claude-sonnet-4".
+	Model string
 }
 
-// LLMConfig is the resolved model and credentials to inject into a tool subprocess.
+// LLMConfig is the resolved model and credentials injected into a tool subprocess.
 type LLMConfig struct {
-	Provider string
-	Model    string
-	APIKey   string
+	Model   string
+	APIKey  string
+	BaseURL string
 }
 
-// Env returns env var assignments to pass to the tool subprocess.
-// The tool reads SOLAI_LLM_PROVIDER, SOLAI_LLM_MODEL, and SOLAI_LLM_API_KEY
-// to initialise its own LLM client.
+// Env returns env var assignments for the tool subprocess. Tools build their
+// own OpenRouter client from SOLAI_LLM_MODEL, SOLAI_LLM_API_KEY, and
+// (optionally) SOLAI_LLM_BASE_URL.
 func (c *LLMConfig) Env() []string {
-	return []string{
-		"SOLAI_LLM_PROVIDER=" + c.Provider,
+	env := []string{
 		"SOLAI_LLM_MODEL=" + c.Model,
 		"SOLAI_LLM_API_KEY=" + c.APIKey,
 	}
+	if c.BaseURL != "" {
+		env = append(env, "SOLAI_LLM_BASE_URL="+c.BaseURL)
+	}
+	return env
 }
 
-// LLMProvider stores API credentials for configured LLM providers.
-// It is a Core-class system component: invisible to the main LLM and agentic tools.
+// LLMProvider stores the OpenRouter credentials shared by the coordinator and
+// every agentic tool. It is a Core-class system component: invisible to the
+// main LLM and agentic tools.
 //
-// Credentials are loaded from environment variables at startup:
-//
-//	LLM_PROVIDER_GOOGLE=<key>
-//	LLM_PROVIDER_OPENAI=<key>
-//	LLM_PROVIDER_ANTHROPIC=<key>
+// OpenRouter unifies access to Google/OpenAI/Anthropic/… models behind a
+// single key, so there is only one credential to manage.
 type LLMProvider struct {
-	credentials map[string]string // provider name (lowercase) → api key
+	apiKey  string
+	baseURL string
 }
 
-// NewLLMProvider reads LLM_PROVIDER_* env vars and returns a configured LLMProvider.
-// Providers whose env var is empty or unset are not stored.
-func NewLLMProvider() *LLMProvider {
-	creds := make(map[string]string)
-	for _, name := range knownProviders {
-		key := os.Getenv("LLM_PROVIDER_" + strings.ToUpper(name))
-		if key != "" {
-			creds[name] = key
-		}
-	}
-	return &LLMProvider{credentials: creds}
+// NewLLMProvider builds a provider from an OpenRouter API key and optional
+// base URL. An empty base URL falls back to the OpenRouter default.
+func NewLLMProvider(apiKey, baseURL string) *LLMProvider {
+	return &LLMProvider{apiKey: apiKey, baseURL: baseURL}
 }
 
-// NewLLMProviderFromMap creates an LLMProvider from an explicit credentials map.
-// Keys are lowercase provider names ("google", "openai", "anthropic").
-// Entries for unknown or empty-valued providers are silently ignored.
-func NewLLMProviderFromMap(creds map[string]string) *LLMProvider {
-	filtered := make(map[string]string)
-	for _, name := range knownProviders {
-		if key, ok := creds[name]; ok && key != "" {
-			filtered[name] = key
-		}
-	}
-	return &LLMProvider{credentials: filtered}
+// NewLLMProviderFromMap builds a provider from a credentials map keyed by
+// provider name. Only the "openrouter" entry is used; empty values are ignored.
+func NewLLMProviderFromMap(creds map[string]string, baseURL string) *LLMProvider {
+	return NewLLMProvider(creds["openrouter"], baseURL)
 }
 
-// IsConfigured reports whether the given provider has credentials loaded.
-func (p *LLMProvider) IsConfigured(provider string) bool {
-	_, ok := p.credentials[strings.ToLower(provider)]
-	return ok
-}
+// IsConfigured reports whether an OpenRouter API key is present.
+func (p *LLMProvider) IsConfigured() bool { return p.apiKey != "" }
 
-// ResolveForTool selects the best LLMConfig for a tool based on its declared model
-// preferences. Resolution order:
-//  1. If the primary model's provider is configured → use it.
-//  2. Otherwise iterate supported in declaration order, return the first configured provider.
-//  3. If no supported provider is configured → return nil (caller should disable the tool).
+// ResolveForTool selects the model to inject into a tool. With a single
+// OpenRouter credential, the primary model is always usable; when it is empty
+// the first supported model is used instead.
+//
+// Returns nil when no API key is configured, in which case the caller should
+// disable any tool that requires an LLM.
 func (p *LLMProvider) ResolveForTool(primary string, supported []LLMModelOption) *LLMConfig {
-	// Build a lookup: model name → option, for finding the primary entry quickly.
-	byModel := make(map[string]LLMModelOption, len(supported))
-	for _, opt := range supported {
-		byModel[opt.Model] = opt
+	if p.apiKey == "" {
+		return nil
 	}
-
-	// Step 1: try primary.
-	if primaryOpt, ok := byModel[primary]; ok {
-		if key, configured := p.credentials[strings.ToLower(primaryOpt.Provider)]; configured {
-			return &LLMConfig{
-				Provider: primaryOpt.Provider,
-				Model:    primaryOpt.Model,
-				APIKey:   key,
-			}
-		}
+	model := primary
+	if model == "" && len(supported) > 0 {
+		model = supported[0].Model
 	}
-
-	// Step 2: first supported with a configured provider.
-	for _, opt := range supported {
-		if key, configured := p.credentials[strings.ToLower(opt.Provider)]; configured {
-			return &LLMConfig{
-				Provider: opt.Provider,
-				Model:    opt.Model,
-				APIKey:   key,
-			}
-		}
+	if model == "" {
+		return nil
 	}
-
-	return nil
+	return &LLMConfig{
+		Model:   model,
+		APIKey:  p.apiKey,
+		BaseURL: p.baseURL,
+	}
 }
 
-// ConfiguredProviders returns the names of all providers with credentials loaded.
-// Used for logging at startup.
+// ConfiguredProviders returns the configured provider names, for startup logging.
 func (p *LLMProvider) ConfiguredProviders() []string {
-	names := make([]string, 0, len(p.credentials))
-	for name := range p.credentials {
-		names = append(names, name)
+	if p.apiKey == "" {
+		return nil
 	}
-	return names
+	return []string{"openrouter"}
 }
 
-// SupportedProviderList formats a ManifestLLMModel slice as a readable provider list.
-// Used in warning messages when a tool is disabled.
-func SupportedProviderList(models []LLMModelOption) string {
-	seen := make(map[string]bool)
-	var parts []string
+// SupportedModelList formats a list of model options as a readable string,
+// used in warning messages when a tool is disabled.
+func SupportedModelList(models []LLMModelOption) string {
+	parts := make([]string, 0, len(models))
 	for _, m := range models {
-		if !seen[m.Provider] {
-			seen[m.Provider] = true
-			parts = append(parts, fmt.Sprintf("%s (%s)", m.Model, m.Provider))
+		if m.Model != "" {
+			parts = append(parts, m.Model)
 		}
+	}
+	if len(parts) == 0 {
+		return "(none declared)"
 	}
 	return strings.Join(parts, ", ")
 }
+
+// APIKey returns the configured OpenRouter key (used by the coordinator to
+// build its own client).
+func (p *LLMProvider) APIKey() string { return p.apiKey }
+
+// BaseURL returns the configured base URL (may be empty).
+func (p *LLMProvider) BaseURL() string { return p.baseURL }

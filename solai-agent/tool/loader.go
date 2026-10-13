@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/solai-agent/capability"
 	solaiconfig "github.com/melodyogonna/solai/solai-agent/config"
-	"github.com/tmc/langchaingo/tools"
 )
 
 // LoadTools walks toolsDir and discovers all agentic tools.
@@ -23,15 +23,13 @@ import (
 // If a tool declares required_capabilities, checker is consulted for each entry.
 // Missing Regular capabilities cause the tool to be disabled with a warning.
 //
-// bwrapPath is the path to the extracted bwrap binary (empty when sandbox is
-// unavailable). A SandboxPolicy is built for each tool from its declared
-// capabilities and injected so calls run inside bubblewrap.
+// Tools run as plain subprocesses (no sandbox).
 //
 // Returns:
-//   - []tools.Tool: successfully loaded tools (may be empty if none found)
+//   - []llm.Tool: successfully loaded tools (may be empty if none found)
 //   - []error: one warning per tool that failed to load or was disabled
 //   - error: fatal only if toolsDir itself cannot be read
-func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *capability.CapabilityManager, bwrapPath string, cfg *solaiconfig.SolaiConfig) ([]tools.Tool, []error, error) {
+func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *capability.CapabilityManager, cfg *solaiconfig.SolaiConfig) ([]llm.Tool, []error, error) {
 	entries, err := os.ReadDir(toolsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading tools directory %s: %w", toolsDir, err)
@@ -51,7 +49,7 @@ func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *ca
 	// Build the capability section once; it's the same for all tools in this agent.
 	capabilitySection := capManager.BuildToolRequestSection()
 
-	var loaded []tools.Tool
+	var loaded []llm.Tool
 	var warnings []error
 
 	for _, entry := range entries {
@@ -84,20 +82,20 @@ func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *ca
 		if opts := manifest.LLMOptions; opts != nil {
 			supported := make([]capability.LLMModelOption, len(opts.Supported))
 			for i, m := range opts.Supported {
-				supported[i] = capability.LLMModelOption{Model: m.Model, Provider: m.Provider}
+				supported[i] = capability.LLMModelOption{Model: m.Model}
 			}
 			llmCfg = provider.ResolveForTool(opts.Primary, supported)
 			if llmCfg == nil {
 				warnings = append(warnings, fmt.Errorf(
 					"tool %q disabled: no supported LLM provider configured (needs one of: %s)",
-					manifest.Name, capability.SupportedProviderList(supported)))
+					manifest.Name, capability.SupportedModelList(supported)))
 				continue
 			}
 		}
 
-		// Validate required capabilities and build the sandbox policy.
-		policy, capWarning := buildSandboxPolicy(manifest, capManager, bwrapPath)
-		if capWarning != nil {
+		// Validate declared required capabilities (registration check only;
+		// tools run as plain subprocesses, so no permissions are granted here).
+		if capWarning := validateCapabilities(manifest, capManager); capWarning != nil {
 			warnings = append(warnings, fmt.Errorf("tool %q disabled: %w", manifest.Name, capWarning))
 			continue
 		}
@@ -110,7 +108,7 @@ func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *ca
 		}
 
 		autoPayloads := resolveAutoPayloads(manifest, capManager)
-		loaded = append(loaded, NewAgenticTool(manifest, toolDir, llmCfg, policy, toolEnv, commCap, autoPayloads, capabilitySection))
+		loaded = append(loaded, NewAgenticTool(manifest, toolDir, llmCfg, toolEnv, commCap, autoPayloads, capabilitySection))
 	}
 
 	return loaded, warnings, nil
@@ -139,25 +137,17 @@ func resolveAutoPayloads(manifest Manifest, capManager *capability.CapabilityMan
 	return result
 }
 
-// buildSandboxPolicy resolves the SandboxPolicy for a tool from its manifest.
-// Returns (policy, nil) on success, or (zero, error) if a required capability
-// is declared but not registered — the tool should be disabled in that case.
-func buildSandboxPolicy(manifest Manifest, checker capability.CapabilityChecker, bwrapPath string) (SandboxPolicy, error) {
-	policy := SandboxPolicy{BwrapPath: bwrapPath}
-
+// validateCapabilities checks that each capability a tool declares in
+// required_capabilities is registered as a Regular capability. Returns an
+// error naming the first missing capability, or nil when all are present.
+func validateCapabilities(manifest Manifest, checker capability.CapabilityChecker) error {
 	for _, name := range manifest.RequiredCapabilities {
 		if !checker.IsRegularCapabilityAvailable(name) {
-			return SandboxPolicy{}, fmt.Errorf(
+			return fmt.Errorf(
 				"required capability %q is not registered (add it to the agent's capability list)", name)
 		}
-		switch name {
-		case "network-manager":
-			policy.ShareNet = true
-		// "file-manager" support is reserved for future implementation.
-		}
 	}
-
-	return policy, nil
+	return nil
 }
 
 // resolveToolEnv builds the "KEY=VALUE" env slice for a tool from the agent config.

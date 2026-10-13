@@ -2,7 +2,7 @@
 
 > **Early development** — SolAI is experimental software. Expect breaking changes, missing features, and rough edges. Do not run it with a wallet holding funds you cannot afford to lose.
 
-An autonomous AI agent for the Solana blockchain. SolAI runs a continuous reasoning loop powered by a user-configured LLM (Google, OpenAI, or Anthropic), coordinating a suite of external tools to accomplish user-defined goals — monitoring token prices, reading on-chain data, executing transactions, or anything else a tool can be built to do.
+An autonomous AI agent for the Solana blockchain. SolAI runs a continuous reasoning loop powered by a user-configured LLM via [OpenRouter](https://openrouter.ai), coordinating a suite of external tools to accomplish user-defined goals — monitoring token prices, reading on-chain data, executing transactions, or anything else a tool can be built to do.
 
 ---
 
@@ -11,8 +11,7 @@ An autonomous AI agent for the Solana blockchain. SolAI runs a continuous reason
 ### System requirements
 
 - **OS:** Linux (x86\_64 or aarch64)
-- **Kernel:** 5.x or later — required for nested unprivileged user namespaces used by the tool sandbox
-- **Internet access:** required to reach the LLM provider API and any tools that call external services
+- **Internet access:** required to reach the OpenRouter API and any tools that call external services
 
 ### Install
 
@@ -25,27 +24,25 @@ This downloads the latest `solai` binary for your architecture (`x86_64` or `aar
 ## Quick start
 
 ```bash
-# Select which model the coordinator uses
-solai config set model.provider google
-solai config set model.name gemini-2.5-pro
+# Select which OpenRouter model the coordinator uses (any model slug)
+solai config set model.name anthropic/claude-sonnet-4
 
-# Set API credentials (add as many providers as you have keys for —
-# they are made available to agentic tools that need an LLM)
-solai config set provider.google <your-google-api-key>
+# Set the OpenRouter API key (shared by the coordinator and agentic tools)
+solai config set provider.openrouter <your-openrouter-api-key>
 
 solai config set user-goals "Monitor SOL price and report every cycle"
 
 solai install token-price   # install a tool
-solai start                 # launch the agent inside a sandbox
+solai start                 # launch the agent
 ```
 
 ---
 
 ## How it works
 
-SolAI operates in a **ReAct loop** (Reason → Act → Observe). Each cycle:
+SolAI operates in a **native tool-calling loop**. Each cycle:
 
-1. The agent is given a system prompt (its role and rules) and the user goals (what to accomplish).
+1. The agent is given a system prompt (its role and rules), the available tools, and the user goals.
 2. It plans which tools to call and in what order.
 3. It calls those tools, observes results, and adapts.
 4. It produces a structured summary of what was accomplished, what failed, and what to try next.
@@ -53,7 +50,7 @@ SolAI operates in a **ReAct loop** (Reason → Act → Observe). Each cycle:
 
 State is carried across cycles in two ways:
 
-- **Conversation window** — the last 3 cycles of conversation history are shared with each new agent instance so it has context on recent actions.
+- **Conversation window** — the most recent cycles of conversation history are shared with each new cycle so it has context on recent actions.
 - **Memory capability** — the agent can explicitly persist a current plan, observations, pending tasks, and completed tasks across cycles by calling the built-in `memory` tool.
 
 ---
@@ -67,25 +64,23 @@ solai uninstall <name>             Remove an installed tool
 solai config set <key> <value>     Set a configuration value
 solai config get <key>             Get a configuration value
 solai config list                  List all values (sensitive fields redacted)
-solai start [--no-sandbox]         Start the autonomous agent
+solai start                        Start the autonomous agent
 ```
 
 ### Configuration keys
 
-**Coordinator model** (required — pick one provider and model):
+**Coordinator model** (required):
 
 | Key | Description |
 |---|---|
-| `model.provider` | LLM provider for the coordinator: `google`, `openai`, or `anthropic` |
-| `model.name` | Model name (e.g. `gemini-2.5-pro`, `gpt-4o`, `claude-opus-4-6`) |
+| `model.name` | OpenRouter model slug for the coordinator (e.g. `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`) |
 
-**Provider credentials** (set any you have — the coordinator uses its own, tools use whichever matches their `llm_options`):
+**Provider credentials:**
 
 | Key | Description |
 |---|---|
-| `provider.google` | Google AI API key |
-| `provider.openai` | OpenAI API key |
-| `provider.anthropic` | Anthropic API key |
+| `provider.openrouter` | OpenRouter API key (shared by the coordinator and all agentic tools) |
+| `openrouter.base-url` | Override the OpenRouter API root (optional; defaults to `https://openrouter.ai/api/v1`) |
 
 **Agent settings:**
 
@@ -94,7 +89,6 @@ solai start [--no-sandbox]         Start the autonomous agent
 | `user-goals` | Goals the agent should pursue autonomously |
 | `cycle-timeout` | Maximum time allowed for a single cycle before it is cancelled and the next begins (default: `5m`) |
 | `wallet-seed` | BIP39 mnemonic — a new wallet is generated if unset |
-| `sandbox.share-net` | Allow agent sandbox network access (default: `true`) |
 
 **Solana settings:**
 
@@ -124,49 +118,32 @@ Configuration is stored in `~/.solai/config.json` and written atomically.
 ```
 solai start
   └─ config.Load()                  ~/.solai/config.json
-  └─ sandbox.Extract()              embedded bwrap binary → /tmp/bwrap-*
-  └─ bwrap --unshare-all            agent sandbox
-       --ro-bind ~/.solai/config.json /etc/solai/config.json
-       --ro-bind ~/.solai/tools       /tools
-       --ro-bind <solai-binary>       /solai
-       -- /solai __agent-run
-
-__agent-run (inside sandbox)
-  └─ agent.LoadConfigFrom()         reads /etc/solai/config.json
-  └─ newLLM()                       initialises coordinator LLM (google/openai/anthropic)
+  └─ newLLM()                       OpenRouter client
+  └─ agent.LoadConfigFrom()         reads model, wallet, cycle timeout
   └─ capability.SetUp()             communication, wallet, solana, network-manager, memory
   └─ agent.Run()                    autonomous cycle loop
-       └─ SystemManager.Setup()     loads tools from /tools, extracts bwrap for tool sandboxing
+       └─ SystemManager.Setup()     loads tools from ~/.solai/tools
        └─ SystemManager.Start(ctx)  background cleanup jobs
-       └─ ReAct cycle loop (shares ConversationWindowBuffer across cycles)
-            └─ buildCyclePrompt()   injects capabilities, agent memory, user goals
-            └─ runCycle()           OneShotAgent → chains.Run (exponential retry on transient errors)
+       └─ tool-calling cycle loop (shares recent conversation across cycles)
+            └─ buildCyclePrompt()   injects agent memory + user goals
+            └─ llm.Agent.Run()      native tool calls (exponential retry on transient errors)
                  └─ AgenticTool.Call()   writes input.json → spawns tool → reads output.json
-                      └─ bwrap (nested)  each tool runs in its own sandbox
 ```
 
 ### Packages
 
 | Package | Responsibility |
 |---|---|
-| `cli/` | Cobra commands: `install`, `uninstall`, `config`, `start`, `__agent-run` |
+| `cli/` | Cobra commands: `install`, `uninstall`, `config`, `start` |
 | `config/` | `~/.solai/config.json` — load, save, set, get |
 | `registry/` | Tool installation from GitHub releases |
 | `agent/` | Autonomous cycle loop, prompt assembly, config loading |
 | `capability/` | Capability system: wallet, solana, memory, LLM provider, SystemManager |
-| `tool/` | Tool discovery, manifest parsing, file-based IPC, sandbox policy |
-| `sandbox/` | Embedded bwrap binary, extraction |
+| `tool/` | Tool discovery, manifest parsing, file-based IPC, subprocess execution |
 | `prompts/` | Embedded system prompt (`system.md`) |
 | `wallet/` | BIP39 seed derivation, ed25519 keypair, Base58 encoding |
+| `llm/` | Dependency-free OpenRouter client + native tool-calling agent loop (shared by the agent and tools) |
 | `ratelimit/` | `ExponentialRetry` (agent cycles), `FixedWindowLimiter` (tool rate limiting) |
-
-### Sandboxing
-
-Tools and the agent itself are isolated using [bubblewrap](https://github.com/containers/bubblewrap) (bwrap), a lightweight unprivileged sandbox.
-
-**Agent sandbox** (`solai start`): the `solai` binary re-invokes itself inside bwrap with `--unshare-all`. Only `~/.solai/config.json`, `~/.solai/tools/`, and the binary itself are visible inside. Networking is enabled by default so the agent can reach the Gemini API.
-
-**Tool sandbox** (nested): each tool subprocess gets its own bwrap instance. The tool directory is mounted read-only at `/app`. Network access is only granted to tools that declare `"required_capabilities": ["network-manager"]` in their manifest.
 
 ### Capabilities
 
@@ -182,11 +159,11 @@ Capabilities are system-level features injected at startup, separate from agenti
 
 | Capability | Class | Description |
 |---|---|---|
-| `system-manager` | Core | Owns tool loading, sandbox extraction, cleanup job scheduling |
+| `system-manager` | Core | Owns tool loading, LLM provider logging, cleanup job scheduling |
 | `communication` | Core | Allocates per-invocation IPC directories for tool subprocess communication |
 | `wallet` | Regular | Agent's Solana keypair — `address` and `sign` actions; address is auto-injected into tool payloads |
 | `solana` | Regular | Solana RPC: `get_balance`, `transfer_sol`, `get_recent_blockhash`, `send_transaction`, `get_account_info` |
-| `network-manager` | Regular | Grants `--share-net` to tool sandboxes that declare it; no runtime actions |
+| `network-manager` | Regular | Declarative marker for tools that use outbound network access; no runtime actions |
 | `memory` | Internal | Persists plan, observations, pending tasks, and completed tasks across cycles |
 
 ---
@@ -214,7 +191,7 @@ Tools are standalone executables (any language) that communicate via file-based 
 
 **IPC protocol:**
 
-Before spawning a tool the coordinator allocates a temporary directory and sets `$SOLAI_IPC_DIR` in the tool's environment (host path when unsandboxed; `/run/solai` inside the sandbox). The tool reads `$SOLAI_IPC_DIR/input.json` on startup, does its work, writes `$SOLAI_IPC_DIR/output.json`, and exits.
+Before spawning a tool the coordinator allocates a temporary directory and sets `$SOLAI_IPC_DIR` in the tool's environment. The tool reads `$SOLAI_IPC_DIR/input.json` on startup, does its work, writes `$SOLAI_IPC_DIR/output.json`, and exits.
 
 ```json
 // $SOLAI_IPC_DIR/input.json  (coordinator → tool)
@@ -230,7 +207,7 @@ Before spawning a tool the coordinator allocates a temporary directory and sets 
 
 `success` and `error` are terminal. `request` is a capability request: the tool writes it and exits immediately. The coordinator reads the `instruction` field and follows it — typically by calling the named capability and re-invoking the tool with the result in `payload`. No re-invocation logic is hardcoded in tool binaries; the inner tool LLM composes the request dynamically.
 
-Tool errors are returned as strings in `payload` so the coordinator LLM can observe them in the ReAct loop and adapt.
+Tool errors are returned as strings in `payload` so the coordinator LLM can observe them in the tool-calling loop and adapt.
 
 **manifest.json:**
 
@@ -278,16 +255,16 @@ For tools that need their own LLM, add `llm_options`:
   "version": "1.0.0",
   "executable": "./bin/my-tool",
   "llm_options": {
-    "primary": "gemini-2.5-pro",
+    "primary": "anthropic/claude-sonnet-4",
     "supported": [
-      { "model": "gemini-2.5-pro", "provider": "google" },
-      { "model": "gpt-4o",         "provider": "openai" }
+      { "model": "anthropic/claude-sonnet-4" },
+      { "model": "openai/gpt-4o" }
     ]
   }
 }
 ```
 
-The agent injects `SOLAI_LLM_PROVIDER`, `SOLAI_LLM_MODEL`, and `SOLAI_LLM_API_KEY` into the tool's environment automatically.
+The agent injects `SOLAI_LLM_MODEL`, `SOLAI_LLM_API_KEY`, and (optionally) `SOLAI_LLM_BASE_URL` into the tool's environment automatically. The OpenRouter model slugs (`vendor/model`) subsume the old provider split — any model reachable through OpenRouter can be listed.
 
 ### Adding a tool locally (without a GitHub release)
 

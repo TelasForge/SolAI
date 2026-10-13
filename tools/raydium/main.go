@@ -14,9 +14,7 @@ import (
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
-	"github.com/tmc/langchaingo/agents"
-	"github.com/tmc/langchaingo/chains"
-	lctools "github.com/tmc/langchaingo/tools"
+	"github.com/melodyogonna/solai/llm"
 )
 
 const raydiumPoolsBase = "https://api-v3.raydium.io/pools/info"
@@ -60,9 +58,9 @@ Input: optional token symbol (SOL, USDC, USDT, RAY, JUP, BONK, WIF, ORCA, PYTH) 
 Returns: list of pools with TVL, 24h volume, APR (fee + reward), and farming status.`
 }
 
-func (t *topPoolsTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
-	input = strings.TrimSpace(stripMarkdownFence(input))
+func (t *topPoolsTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := strings.TrimSpace(llm.ArgString(argsJSON, "input"))
 
 	var apiURL string
 	if mint, ok := resolveMint(input); ok {
@@ -82,6 +80,10 @@ func (t *topPoolsTool) Call(ctx context.Context, input string) (string, error) {
 	return string(data), nil
 }
 
+func (t *topPoolsTool) Parameters() map[string]any {
+	return llm.StringSchema(`Optional token symbol (SOL, USDC, USDT, RAY, JUP, BONK, WIF, ORCA, PYTH) or mint address to filter by; omit for top pools overall.`)
+}
+
 // ---- raydium-search tool ----------------------------------------------------
 
 type searchPoolsTool struct{}
@@ -94,9 +96,9 @@ Input: a known token symbol (SOL, USDC, USDT, RAY, JUP, BONK, WIF, ORCA, PYTH) o
 Returns: matching pools with TVL, APR, volume, and farm details.`
 }
 
-func (t *searchPoolsTool) Call(ctx context.Context, input string) (string, error) {
-	slog.Info("tool call", "tool", t.Name(), "input", input)
-	input = strings.TrimSpace(stripMarkdownFence(input))
+func (t *searchPoolsTool) Call(ctx context.Context, argsJSON string) (string, error) {
+	slog.Info("tool call", "tool", t.Name(), "input", argsJSON)
+	input := strings.TrimSpace(llm.ArgString(argsJSON, "input"))
 	if input == "" {
 		return "", fmt.Errorf("search query is required")
 	}
@@ -117,6 +119,10 @@ func (t *searchPoolsTool) Call(ctx context.Context, input string) (string, error
 	summaries := summarisePools(pools, 10)
 	data, _ := json.Marshal(summaries)
 	return string(data), nil
+}
+
+func (t *searchPoolsTool) Parameters() map[string]any {
+	return llm.StringSchema(`A known token symbol (SOL, USDC, USDT, RAY, JUP, BONK, WIF, ORCA, PYTH) or a raw mint address.`)
 }
 
 // ---- main -------------------------------------------------------------------
@@ -145,23 +151,21 @@ func main() {
 
 	ctx := context.Background()
 
-	llm, err := newLLM(ctx)
+	client, err := llm.FromEnv()
 	if err != nil {
 		slog.Error("llm init failed", "error", err)
 		writeError(fmt.Sprintf("LLM initialisation failed: %v", err))
 		return
 	}
-	slog.Info("llm initialised")
+	slog.Info("llm initialised", "model", client.Model())
 
-	tools := []lctools.Tool{
+	tools := []llm.Tool{
 		&topPoolsTool{},
 		&searchPoolsTool{},
 	}
-	agentInst := agents.NewOneShotAgent(llm, tools,
-		agents.WithMaxIterations(6),
-		agents.WithPromptPrefix(agentSystemPrompt),
+	agentInst := llm.NewAgent(client, tools, agentSystemPrompt,
+		llm.WithMaxIterations(6),
 	)
-	executor := agents.NewExecutor(agentInst)
 
 	prompt := input.Prompt
 	if len(input.Payload) > 0 {
@@ -172,25 +176,11 @@ func main() {
 	}
 
 	slog.Info("agent starting", "prompt", prompt)
-	result, err := chains.Run(ctx, executor, prompt)
+	result, _, err := agentInst.Run(ctx, prompt, nil)
 	if err != nil {
-		const parsePrefix = "unable to parse agent output: "
-		if i := strings.Index(err.Error(), parsePrefix); i >= 0 {
-			extracted := err.Error()[i+len(parsePrefix):]
-			// If the extracted text is a raw ReAct trace the agent loop never
-			// completed — don't return it as a result.
-			if strings.HasPrefix(extracted, "Thought:") {
-				slog.Error("agent failed", "error", err)
-				writeError(fmt.Sprintf("agent run failed: %v", err))
-				return
-			}
-			slog.Warn("agent parse error recovered", "extracted_len", len(extracted))
-			result = extracted
-		} else {
-			slog.Error("agent failed", "error", err)
-			writeError(fmt.Sprintf("agent run failed: %v", err))
-			return
-		}
+		slog.Error("agent failed", "error", err)
+		writeError(fmt.Sprintf("agent run failed: %v", err))
+		return
 	}
 
 	slog.Info("agent completed")

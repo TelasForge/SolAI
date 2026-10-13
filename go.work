@@ -2,6 +2,8 @@ go 1.25.7
 
 use ./ratelimit
 
+use ./llm
+
 use ./solai-agent
 
 use (

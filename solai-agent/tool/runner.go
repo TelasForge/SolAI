@@ -36,153 +36,33 @@ type ToolOutput struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// FSBind is a filesystem path bind-mounted into the sandbox.
-type FSBind struct {
-	// Path is the host path to bind-mount. It becomes available at the same
-	// path inside the sandbox.
-	Path string
-
-	// ReadOnly, when true, mounts the path read-only (--ro-bind).
-	// When false, the path is writable (--bind).
-	ReadOnly bool
-}
-
-// SandboxPolicy defines the isolation constraints applied when running a tool.
-// The zero value represents the minimal (deny-all network, no extra mounts) policy.
-type SandboxPolicy struct {
-	// BwrapPath is the path to the bwrap binary to use. Empty means sandbox
-	// is unavailable and the tool runs as a plain subprocess (unsandboxed).
-	BwrapPath string
-
-	// ShareNet, when true, passes --share-net to bwrap, granting the tool
-	// access to the host network stack. Corresponds to the "network-manager"
-	// capability.
-	ShareNet bool
-
-	// FSBinds is an ordered list of extra filesystem paths to expose inside
-	// the sandbox. Corresponds to the "file-manager" capability (future).
-	FSBinds []FSBind
-
-	// IPCDir is the host path of the per-invocation IPC directory. When
-	// non-empty and BwrapPath is set, it is bind-mounted at /run/solai inside
-	// the sandbox. The tool reads input.json and writes output.json there.
-	IPCDir string
-}
-
-// systemLibDirs lists host paths that dynamically-linked tool binaries need
-// inside the sandbox. Each present path is bind-mounted read-only.
-var systemLibDirs = []string{
-	"/lib",
-	"/lib64",
-	"/usr/lib",
-	"/usr/lib64",
-	"/etc/ld.so.cache",
-	"/etc/ld.so.conf",
-	"/etc/ld.so.conf.d",
-}
-
-// buildBwrapArgs constructs the bwrap argument list for the given policy.
-func buildBwrapArgs(policy SandboxPolicy, toolDir, executable string) []string {
-	// Clean the executable path to resolve "./" prefixes while preserving any
-	// subdirectory structure (e.g. "./bin/token-price" → "bin/token-price").
-	// The tool directory is bind-mounted at /app, so the in-sandbox path is
-	// /app/<cleaned-relative-path>.
-	rel := filepath.Clean(executable)
-
-	args := []string{
-		"--unshare-all",
-		"--ro-bind", toolDir, "/app",
-		"--tmpfs", "/tmp",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--die-with-parent",
-	}
-
-	// Bind system library directories so dynamically-linked tool binaries
-	// can find their ELF interpreter and shared libraries.
-	for _, p := range systemLibDirs {
-		if _, err := os.Stat(p); err == nil {
-			args = append(args, "--ro-bind", p, p)
-		}
-	}
-
-	if policy.ShareNet {
-		args = append(args, "--share-net")
-
-		// Bind essential DNS/TLS files so the tool can make network calls.
-		// These are the same files bound in the agent sandbox; inside a nested
-		// sandbox they are available at the same paths.
-		for _, p := range []string{
-			"/etc/resolv.conf",
-			"/etc/nsswitch.conf",
-			"/etc/ssl/certs",
-			"/etc/ca-certificates.conf",
-			"/etc/ca-certificates",
-			"/etc/pki/tls/certs",
-		} {
-			if _, err := os.Stat(p); err == nil {
-				args = append(args, "--ro-bind", p, p)
-			}
-		}
-	}
-
-	for _, bind := range policy.FSBinds {
-		if bind.ReadOnly {
-			args = append(args, "--ro-bind", bind.Path, bind.Path)
-		} else {
-			args = append(args, "--bind", bind.Path, bind.Path)
-		}
-	}
-
-	// Bind the IPC directory so the tool can read input.json and write output.json.
-	if policy.IPCDir != "" {
-		args = append(args, "--bind", policy.IPCDir, "/run/solai")
-	}
-
-	args = append(args, "--", "/app/"+rel)
-	return args
-}
-
 // RunTool writes input.json to the IPC directory, spawns the tool subprocess,
 // waits for it to exit, then reads and returns output.json.
 //
 // The tool reads $SOLAI_IPC_DIR/input.json on startup and writes
-// $SOLAI_IPC_DIR/output.json before exiting. The IPC directory must already
-// exist with its host path set in policy.IPCDir; SOLAI_IPC_DIR in extraEnv
-// must point to the in-process view of that directory.
+// $SOLAI_IPC_DIR/output.json before exiting. solaiIPCEnv must point at the
+// directory the tool should use for IPC.
 //
 // The process is killed if ctx is cancelled or the per-tool timeout elapses.
-func RunTool(ctx context.Context, dir, executable string, input ToolInput, timeout time.Duration, extraEnv []string, policy SandboxPolicy) (ToolOutput, error) {
+func RunTool(ctx context.Context, dir, executable string, input ToolInput, timeout time.Duration, extraEnv []string, ipcDir string) (ToolOutput, error) {
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
 		return ToolOutput{}, fmt.Errorf("marshalling tool input: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(policy.IPCDir, "input.json"), inputJSON, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(ipcDir, "input.json"), inputJSON, 0o600); err != nil {
 		return ToolOutput{}, fmt.Errorf("writing input.json: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if policy.BwrapPath != "" {
-		bwrapArgs := buildBwrapArgs(policy, dir, executable)
-		slog.Debug("running tool in sandbox", "bwrap", policy.BwrapPath, "args", strings.Join(bwrapArgs, " "))
-		cmd = exec.CommandContext(ctx, policy.BwrapPath, bwrapArgs...)
-		if len(extraEnv) > 0 {
-			cmd.Env = extraEnv
-		}
-	} else {
-		// Resolve to an absolute path so exec finds the binary regardless of
-		// the agent's current working directory (cmd.Dir only affects the child
-		// process's working directory, not the path lookup for the executable).
-		absExec := filepath.Join(dir, executable)
-		cmd = exec.CommandContext(ctx, absExec)
-		cmd.Dir = dir
-		if len(extraEnv) > 0 {
-			cmd.Env = append(os.Environ(), extraEnv...)
-		}
-	}
+	// Resolve to an absolute path so exec finds the binary regardless of the
+	// agent's current working directory (cmd.Dir only affects the child
+	// process's working directory, not the path lookup for the executable).
+	absExec := filepath.Join(dir, executable)
+	cmd := exec.CommandContext(ctx, absExec)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), extraEnv...)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -208,7 +88,7 @@ func RunTool(ctx context.Context, dir, executable string, input ToolInput, timeo
 	}
 	slog.Debug("tool process exited", "executable", executable)
 
-	data, err := os.ReadFile(filepath.Join(policy.IPCDir, "output.json"))
+	data, err := os.ReadFile(filepath.Join(ipcDir, "output.json"))
 	if err != nil {
 		return ToolOutput{}, fmt.Errorf("reading output.json: %w", err)
 	}
@@ -222,8 +102,9 @@ func RunTool(ctx context.Context, dir, executable string, input ToolInput, timeo
 	return output, nil
 }
 
-// parseTaskInput converts the LLM's action input string into a ToolInput.
-// The LLM may produce either a JSON object or a plain English string.
+// parseTaskInput converts the model's tool-call arguments into a ToolInput.
+// The model supplies a JSON object with "prompt" and (optionally) "payload";
+// a bare string is accepted as a fallback.
 func parseTaskInput(input string) ToolInput {
 	var ti ToolInput
 	if err := json.Unmarshal([]byte(input), &ti); err == nil && ti.Prompt != "" {

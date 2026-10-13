@@ -14,11 +14,11 @@
   ],
   "timeout": "120s",
   "llm_options": {
-    "primary": "gemini-2.5-pro",
+    "primary": "anthropic/claude-sonnet-4",
     "supported": [
-      { "model": "gemini-2.5-pro",  "provider": "google"    },
-      { "model": "gpt-4o",          "provider": "openai"    },
-      { "model": "claude-opus-4-6", "provider": "anthropic" }
+      { "model": "anthropic/claude-sonnet-4" },
+      { "model": "openai/gpt-4o" },
+      { "model": "google/gemini-2.5-pro" }
     ]
   }
 }

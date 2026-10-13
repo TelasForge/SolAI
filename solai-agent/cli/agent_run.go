@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,50 +9,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/solai-agent/agent"
 	"github.com/melodyogonna/solai/solai-agent/capability"
 	solaiconfig "github.com/melodyogonna/solai/solai-agent/config"
 	"github.com/melodyogonna/solai/solai-agent/prompts"
-	"github.com/spf13/cobra"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/googleai"
-	"github.com/tmc/langchaingo/llms/openai"
 )
-
-// agentRunCmd is the hidden subcommand invoked inside the bwrap sandbox by
-// "solai start". It is not shown in help output.
-var agentRunCmd = &cobra.Command{
-	Use:    "__agent-run",
-	Hidden: true,
-	RunE:   runAgentRunCmd,
-}
-
-func init() {
-	rootCmd.AddCommand(agentRunCmd)
-}
-
-// runAgentRunCmd is the cobra handler for __agent-run.
-// Inside the bwrap sandbox, config is at /etc/solai/config.json and tools at /tools/.
-// SOLAI_CONFIG_PATH overrides the config path (useful for --no-sandbox debug path).
-func runAgentRunCmd(cmd *cobra.Command, args []string) error {
-	configPath := "/etc/solai/config.json"
-	if v := os.Getenv("SOLAI_CONFIG_PATH"); v != "" {
-		configPath = v
-	}
-	toolsDir := "/tools"
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return fmt.Errorf("reading config from %s: %w", configPath, err)
-	}
-	cfg := solaiconfig.DefaultConfig()
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parsing config: %w", err)
-	}
-
-	return agentRun(cmd.Context(), cfg, toolsDir)
-}
 
 // initLogger configures the global slog logger. The level is controlled by the
 // SOLAI_LOG_LEVEL env var (debug, info, warn, error; default: info).
@@ -71,14 +32,12 @@ func initLogger() {
 }
 
 // agentRun initializes and runs the autonomous agent loop.
-// It is called by the __agent-run subcommand (inside bwrap) and by
-// "solai start --no-sandbox" (directly on the host).
 func agentRun(ctx context.Context, cfg *solaiconfig.SolaiConfig, toolsDir string) error {
 	initLogger()
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	llm, err := newLLM(ctx, cfg)
+	llmClient, err := newLLM(cfg)
 	if err != nil {
 		return fmt.Errorf("initializing LLM: %w", err)
 	}
@@ -87,7 +46,7 @@ func agentRun(ctx context.Context, cfg *solaiconfig.SolaiConfig, toolsDir string
 	if err != nil {
 		return fmt.Errorf("building agent config: %w", err)
 	}
-	agentCfg.LLM = llm
+	agentCfg.LLM = llmClient
 
 	capability.Register("communication", func() capability.Capability {
 		return capability.NewCommunicationCapability()
@@ -107,7 +66,6 @@ func agentRun(ctx context.Context, cfg *solaiconfig.SolaiConfig, toolsDir string
 	capManager := capability.SetUp([]string{"communication", "wallet", "solana", "network-manager", "memory"})
 
 	slog.Info("SolAI agent starting",
-		"provider", cfg.Model.Provider,
 		"model", cfg.Model.Name,
 		"toolsDir", toolsDir,
 		"cycleTimeout", agentCfg.CycleTimeout,
@@ -119,30 +77,13 @@ func agentRun(ctx context.Context, cfg *solaiconfig.SolaiConfig, toolsDir string
 	return nil
 }
 
-// newLLM creates a langchaingo LLM from the model config in cfg.
-// The API key is taken from cfg.Providers[cfg.Model.Provider].
-func newLLM(ctx context.Context, cfg *solaiconfig.SolaiConfig) (llms.Model, error) {
-	provider := cfg.Model.Provider
-	model := cfg.Model.Name
-	apiKey := cfg.Providers[provider]
-
-	switch provider {
-	case "google":
-		return googleai.New(ctx,
-			googleai.WithAPIKey(apiKey),
-			googleai.WithDefaultModel(model),
-		)
-	case "openai":
-		return openai.New(
-			openai.WithToken(apiKey),
-			openai.WithModel(model),
-		)
-	case "anthropic":
-		return anthropic.New(
-			anthropic.WithToken(apiKey),
-			anthropic.WithModel(model),
-		)
-	default:
-		return nil, fmt.Errorf("unsupported provider %q (supported: google, openai, anthropic)", provider)
-	}
+// newLLM builds an OpenRouter client from the model config in cfg.
+func newLLM(cfg *solaiconfig.SolaiConfig) (*llm.Client, error) {
+	return llm.NewClient(llm.Config{
+		APIKey:  cfg.Providers["openrouter"],
+		BaseURL: cfg.OpenRouterBaseURL,
+		Model:   cfg.Model.Name,
+		Referer: "https://github.com/melodyogonna/solai",
+		Title:   "SolAI",
+	})
 }

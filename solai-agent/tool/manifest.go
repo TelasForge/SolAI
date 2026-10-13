@@ -8,11 +8,9 @@ import (
 
 // ManifestLLMModel is one entry in a tool's supported model list.
 type ManifestLLMModel struct {
-	// Model is the model name, e.g. "gemini-2.5-pro" or "gpt-4o".
+	// Model is an OpenRouter model slug, e.g. "anthropic/claude-sonnet-4" or
+	// "openai/gpt-4o".
 	Model string `json:"model"`
-
-	// Provider is the lowercase provider name: "google", "openai", or "anthropic".
-	Provider string `json:"provider"`
 }
 
 // LLMOptions declares which LLM models a tool supports.
@@ -80,7 +78,7 @@ type Manifest struct {
 	// RequiredCapabilities lists Regular capabilities this tool needs.
 	// Each entry is a capability name (e.g. "network-manager", "file-manager").
 	// Tools declaring capabilities that are not registered are disabled at load
-	// time with a warning. An absent or empty list means minimal sandbox only.
+	// time with a warning. An absent or empty list means no extra capabilities.
 	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
 
 	// Timeout is a Go duration string (e.g. "90s", "2m") for how long a single
