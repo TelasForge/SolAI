@@ -4,6 +4,8 @@ use ./ratelimit
 
 use ./llm
 
+use ./ipc
+
 use ./solai-agent
 
 use (

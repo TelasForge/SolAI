@@ -18,7 +18,7 @@ func makeManifest(name, desc, executable, timeout string) Manifest {
 }
 
 func newTestAgenticTool(m Manifest, llmCfg *capability.LLMConfig) *AgenticTool {
-	return NewAgenticTool(m, "/tools/"+m.Name, llmCfg, nil, capability.NewCommunicationCapability(), nil, "")
+	return NewAgenticTool(m, "/tools/"+m.Name, llmCfg, nil, capability.NewCommunicationCapability(), nil, "", nil)
 }
 
 // ---- NewAgenticTool — timeout parsing ---------------------------------------

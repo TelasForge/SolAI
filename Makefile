@@ -1,11 +1,15 @@
-.PHONY: all solai tools token-price clean test test-agent test-tools
+.PHONY: all solai solaid tools token-price clean test test-agent test-tools
 
 # Build everything
-all: solai tools
+all: solai solaid tools
 
-# Build the solai CLI binary → .out/solai
+# Build the solai CLI/runtime binary → .out/solai
 solai:
 	CGO_ENABLED=0 go build -o .out/solai ./solai-agent
+
+# Build the solaid control-plane binary → .out/solaid
+solaid:
+	CGO_ENABLED=0 go build -o .out/solaid ./solai-agent/cmd/solaid
 
 # Build all tools
 tools: token-price

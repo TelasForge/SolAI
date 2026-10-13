@@ -1,39 +1,54 @@
 # AGENT.md
 
 Guidance for AI coding agents working on SolAI. Keep this file accurate and
-concise; put user-facing docs in `README.md` and architecture detail in `plan.md`.
+concise. `plan.md` is the design; `README.md` is the user-facing doc.
 
 ## Golden rules
 
-1. **No OS-level sandboxing.** Tools run as ordinary child processes. Do not add
-   bubblewrap/bwrap, namespaces, or seccomp to `solai-agent/tool`.
+1. **The runtime never implements sandboxing.** It only launches commands. Where
+   a session or tool actually runs is the operator's infrastructure (e.g. a
+   microVM wrapper around the launch command). Do not add sandbox SDKs here.
 2. **OpenRouter only.** One credential (`provider.openrouter`); the model is an
-   OpenRouter slug (`vendor/model`). No `model.provider`, no per-vendor keys, no
-   `SOLAI_LLM_PROVIDER`.
-3. **Native tool calling only.** Tools are JSON-schema functions; the model
-   returns structured `tool_calls`. No ReAct text format, no markdown-fence
-   stripping.
-4. Keep `README.md`, `plan.md`, `tools/tool-plan.md`, and this file in sync with
-   code changes.
+   OpenRouter slug (`vendor/model`).
+3. **Native tool calling.** Tools are JSON-schema functions; the model returns
+   structured `tool_calls`.
+4. **Sessions.** A session runs continuously until its goals are resolved or it
+   is stopped; one conversation for the life of the session.
+5. Keep `README.md`, `plan.md`, `tools/tool-plan.md`, and this file in sync.
+
+## Architecture
+
+Two components (see `plan.md`):
+
+- **Agent runtime** — runs one session; reads a spec from stdin, runs the goal
+  loop, emits JSON-line events on stdout. Sandbox-unaware.
+- **Control plane (`solaid`)** — HTTP/SSE API; in-memory sessions; launches the
+  runtime as a command and relays its events.
+
+Sandboxing is surrounding infrastructure. Do not build it here.
 
 ## Layout
 
 ```
 ratelimit/               shared: rate limiting + retry
-llm/                     shared: OpenRouter client + tool-calling agent loop
-solai-agent/             coordinator binary (`solai`)
+llm/                     shared: OpenRouter client + tool-calling loop
+ipc/                     shared: file-based tool IPC protocol (atomic writes)
+solai-agent/             runtime + CLI
+  session/               session spec, event stream, continuous goal loop
+  controlplane/          control-plane API: manager, launcher, HTTP/SSE server
+  cmd/solaid/            control-plane binary (`solaid`)
 tools/token-price/       agentic tool
 tools/raydium/           agentic tool
 tools/jupiter-swap/      agentic tool
 registry/index.json      curated tool index
 ```
 
-`solai-agent/` packages: `cli`, `config`, `agent`, `capability`, `tool`,
-`prompts`, `wallet`, `registry`. See `README.md` for what each does.
+`solai-agent/` packages today: `cli`, `config`, `capability`, `tool`,
+`prompts`, `wallet`, `registry`, plus `session` and `controlplane`.
 
-`llm/`: `client.go` (OpenRouter, retries), `agent.go` (`Agent.Run`,
-`TrimHistory`, `ErrMaxIterations`), `tool.go` (`Tool`, `ParameterizedTool`,
-schema/arg helpers), `types.go`.
+`llm/`: `client.go` (OpenRouter, retries), `agent.go` (`Agent`, `TrimHistory`,
+`ErrMaxIterations`), `tool.go` (`Tool`, `ParameterizedTool`, schema/arg
+helpers), `types.go`.
 
 ## Build & test
 
@@ -64,20 +79,40 @@ module must be clean.
       // ...
   }
   ```
+- **Goal loop:** the runtime injects a `goal` tool (`complete`/`fail`/`block`/
+  `note`). If the model stops without resolving a goal, re-prompt it to continue;
+  do not end the session. A safety cap pauses and reports — it never silently
+  truncates.
 - **History invariant:** never split an assistant `tool_calls` message from its
-  matching `tool` result. `llm.TrimHistory` cuts on user-message boundaries;
-  preserve that.
-- **Tools as subprocesses:** read `$SOLAI_IPC_DIR/input.json`, write exactly one
-  `$SOLAI_IPC_DIR/output.json` (`success`/`error`/`request`), log to stderr only.
+  matching `tool` result.
+- **Tools as subprocesses:** the runtime writes `$SOLAI_IPC_DIR/input.json`,
+  starts the tool, waits for exit, then reads `output.json`. Completion is
+  signalled by a valid `output.json`, not the exit code: a tool may exit nonzero
+  and still report a structured `error`. A missing/malformed result is an
+  infrastructure error. Both sides use `github.com/melodyogonna/solai/ipc`.
   Full contract in `tools/tool-plan.md`.
 - **Capabilities:** `Core` (invisible), `Internal` (coordinator-only),
   `Regular` (coordinator + requestable by tools). Empty `Description()` hides
-  one from the LLM. Register in `cli/agent_run.go`.
+  one from the LLM. A tool's `request` output is executed by `capability.Broker`
+  on the runtime side (only `Regular` capabilities are requestable); the broker
+  returns the result to the coordinator, which follows the tool's instruction.
 - **PR titles:** `[Package] Title`, both parts start uppercase.
 - **Comments:** keep production code sparsely commented; tests may use comments
   freely.
 - **Development:** a human may be editing concurrently — treat the codebase, not
   memory, as the source of truth.
+
+## Architecture notes
+
+- `solai-agent/session` is the session runtime. `solai __runtime` runs one
+  session from a spec on stdin (used by the control plane); `solai start` builds
+  a spec from config and runs it locally.
+- `solai-agent/controlplane` + `cmd/solaid` are the control-plane API
+  (in-memory sessions, SSE relay). It launches each session via a configurable
+  command — the sandbox seam.
+- A tool is a plain program; tool IPC uses the shared `ipc/` module (typed
+  input/output, atomic `output.json`).
+- Config lives in `~/.solai/config.json`; see `README.md` for the keys.
 
 ## Gotchas
 
@@ -88,4 +123,3 @@ module must be clean.
 - Tool env comes only from `tool-env.<tool>.<VAR>`; a missing `required` var
   disables the tool with a warning (not fatal).
 - `network-manager` grants nothing at the OS level — it is a declarative marker.
-- `system-manager` is a `Core` capability and is therefore hidden from the LLM.

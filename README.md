@@ -1,93 +1,117 @@
-# Solana AI
+# SolAI
 
-> **Early development** — SolAI is experimental software. Expect breaking changes, missing features, and rough edges. Do not run it with a wallet holding funds you cannot afford to lose.
+> **Status:** SolAI is implemented as a minimal agent harness. See `plan.md` for
+> the design and `AGENT.md` for contributor guidance.
 
-An autonomous AI agent for the Solana blockchain. SolAI runs a continuous reasoning loop powered by a user-configured LLM via [OpenRouter](https://openrouter.ai), coordinating a suite of external tools to accomplish user-defined goals — monitoring token prices, reading on-chain data, executing transactions, or anything else a tool can be built to do.
+SolAI runs long-lived Solana agents. A user starts a **session** with one or
+more **goals**, chooses the **tools** and **capabilities** available to it, and
+the agent works continuously until the goals are resolved or the session is
+stopped. LLM access is via [OpenRouter](https://openrouter.ai).
 
 ---
 
-## Installation
-
-### System requirements
-
-- **OS:** Linux (x86\_64 or aarch64)
-- **Internet access:** required to reach the OpenRouter API and any tools that call external services
-
-### Install
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/melodyogonna/solai/main/install.sh | bash
 ```
 
-This downloads the latest `solai` binary for your architecture (`x86_64` or `aarch64`) and places it in `~/.local/bin`. If that directory is not on your `PATH` the script will print the exact command to add it.
+Downloads the latest `solai` binary for your architecture (`x86_64` or
+`aarch64`) into `~/.local/bin`. The script prints a `PATH` hint if needed.
 
-## Quick start
+**Requirements:** Linux (x86\_64 or aarch64) and internet access to reach the
+OpenRouter API and any external services your tools call.
+
+---
+
+## Concepts
+
+- **Session** — one long-running agent run. Config: goals, model, tools,
+  capabilities. It runs until the goals are done or it is stopped.
+- **Goal** — a task the session must accomplish. The agent works through goals
+  one at a time and explicitly marks each `complete`, `fail`, or `block`.
+- **Tool** — a standalone executable with a `manifest.json` that the agent can
+  call. Tools are selected per session.
+- **Capability** — a system feature (wallet, Solana RPC, memory) selected per
+  session. Capabilities are exposed to the coordinator as tools and are reachable
+  by agentic tools through the `request` protocol: the tool emits a request and
+  the runtime's broker performs it.
+
+## Run a session
+
+For a quick local run, `solai start` builds a session from `user-goals` and the
+configured model and runs it on this host.
+
+The agent runtime reads a session spec from stdin and streams events as
+JSON lines on stdout:
 
 ```bash
-# Select which OpenRouter model the coordinator uses (any model slug)
-solai config set model.name anthropic/claude-sonnet-4
+solai __runtime < session.json
+```
 
-# Set the OpenRouter API key (shared by the coordinator and agentic tools)
-solai config set provider.openrouter <your-openrouter-api-key>
+```json
+{
+  "goals": ["Monitor SOL price and report significant moves"],
+  "model": "anthropic/claude-sonnet-4",
+  "tools": ["token-price"],
+  "capabilities": ["wallet", "solana", "memory"]
+}
+```
 
-solai config set user-goals "Monitor SOL price and report every cycle"
+The control plane launches the runtime this way. Sandboxing is **not** this
+code's concern: the operator wraps the launch command with their own
+infrastructure (e.g. a microVM runner). The runtime only launches commands.
 
-solai install token-price   # install a tool
-solai start                 # launch the agent
+## Control-plane API
+
+`solaid` creates, launches, and tracks sessions and relays their events. State
+is in-memory. Each session is launched as a command, so the operator can point
+`--launch` at a sandbox wrapper (e.g. a microVM runner).
+
+```bash
+solaid --addr 127.0.0.1:8787 --launch "solai __runtime"
+
+# Start a session
+curl -sX POST localhost:8787/sessions -d '{
+  "goals": ["Monitor SOL and report big moves"],
+  "model": "anthropic/claude-sonnet-4",
+  "tools": ["token-price"],
+  "capabilities": ["wallet", "solana", "memory", "network-manager"]
+}'
+
+# Watch it live
+curl -N localhost:8787/sessions/<id>/events
+```
+
+```
+POST   /sessions                 create + start (session spec)
+GET    /sessions                 list
+GET    /sessions/{id}            status + goals
+POST   /sessions/{id}/stop
+GET    /sessions/{id}/events     SSE live event stream
+GET    /tools                    available tools
+GET    /capabilities             available capabilities
 ```
 
 ---
 
-## How it works
+## Configuration
 
-SolAI operates in a **native tool-calling loop**. Each cycle:
+Configuration lives in `~/.solai/config.json` and is managed with
+`solai config set/get/list`.
 
-1. The agent is given a system prompt (its role and rules), the available tools, and the user goals.
-2. It plans which tools to call and in what order.
-3. It calls those tools, observes results, and adapts.
-4. It produces a structured summary of what was accomplished, what failed, and what to try next.
-5. It immediately begins the next cycle. Each cycle has a configurable timeout (`cycle-timeout`) to prevent runaway LLM calls.
-
-State is carried across cycles in two ways:
-
-- **Conversation window** — the most recent cycles of conversation history are shared with each new cycle so it has context on recent actions.
-- **Memory capability** — the agent can explicitly persist a current plan, observations, pending tasks, and completed tasks across cycles by calling the built-in `memory` tool.
-
----
-
-## CLI
-
-```
-solai install <name[@tag]>         Install a curated tool by short name
-solai install <owner/repo[@tag]>   Install a third-party tool from a GitHub release
-solai uninstall <name>             Remove an installed tool
-solai config set <key> <value>     Set a configuration value
-solai config get <key>             Get a configuration value
-solai config list                  List all values (sensitive fields redacted)
-solai start                        Start the autonomous agent
-```
-
-### Configuration keys
-
-**Coordinator model** (required):
+**Model & credentials:**
 
 | Key | Description |
 |---|---|
-| `model.name` | OpenRouter model slug for the coordinator (e.g. `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`) |
-
-**Provider credentials:**
-
-| Key | Description |
-|---|---|
-| `provider.openrouter` | OpenRouter API key (shared by the coordinator and all agentic tools) |
-| `openrouter.base-url` | Override the OpenRouter API root (optional; defaults to `https://openrouter.ai/api/v1`) |
+| `model.name` | OpenRouter model slug for the coordinator (e.g. `anthropic/claude-sonnet-4`) |
+| `provider.openrouter` | OpenRouter API key (shared by the agent and tools) |
+| `openrouter.base-url` | Optional OpenRouter API root override |
 
 **Agent settings:**
 
 | Key | Description |
 |---|---|
-| `user-goals` | Goals the agent should pursue autonomously |
-| `cycle-timeout` | Maximum time allowed for a single cycle before it is cancelled and the next begins (default: `5m`) |
 | `wallet-seed` | BIP39 mnemonic — a new wallet is generated if unset |
 
 **Solana settings:**
@@ -95,121 +119,57 @@ solai start                        Start the autonomous agent
 | Key | Description |
 |---|---|
 | `solana.rpc-url` | Solana RPC endpoint (default: `https://api.mainnet-beta.solana.com`) |
-| `solana.commitment` | Commitment level: `finalized`, `confirmed`, or `processed` (default: `confirmed`) |
+| `solana.commitment` | `finalized`, `confirmed`, or `processed` (default: `confirmed`) |
 
 **Tool environment variables:**
 
-Tools can declare runtime variables they need (e.g. API keys). Set them with:
-
 ```bash
 solai config set tool-env.<tool>.<VAR_NAME> <value>
-# example:
-solai config set tool-env.birdeye.BIRDEYE_API_KEY abc123
 ```
 
-Values are stored in `~/.solai/config.json` and injected into the tool's environment at runtime. All tool env values are redacted in `config list` output.
-
-Configuration is stored in `~/.solai/config.json` and written atomically.
-
----
-
-## Architecture
-
-```
-solai start
-  └─ config.Load()                  ~/.solai/config.json
-  └─ newLLM()                       OpenRouter client
-  └─ agent.LoadConfigFrom()         reads model, wallet, cycle timeout
-  └─ capability.SetUp()             communication, wallet, solana, network-manager, memory
-  └─ agent.Run()                    autonomous cycle loop
-       └─ SystemManager.Setup()     loads tools from ~/.solai/tools
-       └─ SystemManager.Start(ctx)  background cleanup jobs
-       └─ tool-calling cycle loop (shares recent conversation across cycles)
-            └─ buildCyclePrompt()   injects agent memory + user goals
-            └─ llm.Agent.Run()      native tool calls (exponential retry on transient errors)
-                 └─ AgenticTool.Call()   writes input.json → spawns tool → reads output.json
-```
-
-### Packages
-
-| Package | Responsibility |
-|---|---|
-| `cli/` | Cobra commands: `install`, `uninstall`, `config`, `start` |
-| `config/` | `~/.solai/config.json` — load, save, set, get |
-| `registry/` | Tool installation from GitHub releases |
-| `agent/` | Autonomous cycle loop, prompt assembly, config loading |
-| `capability/` | Capability system: wallet, solana, memory, LLM provider, SystemManager |
-| `tool/` | Tool discovery, manifest parsing, file-based IPC, subprocess execution |
-| `prompts/` | Embedded system prompt (`system.md`) |
-| `wallet/` | BIP39 seed derivation, ed25519 keypair, Base58 encoding |
-| `llm/` | Dependency-free OpenRouter client + native tool-calling agent loop (shared by the agent and tools) |
-| `ratelimit/` | `ExponentialRetry` (agent cycles), `FixedWindowLimiter` (tool rate limiting) |
-
-### Capabilities
-
-Capabilities are system-level features injected at startup, separate from agentic tools. Each has a class that determines who can see and use it:
-
-| Class | Accessible to | Purpose |
-|---|---|---|
-| `Core` | Nobody | Background infrastructure; never exposed to any LLM |
-| `Internal` | Coordinator LLM only | Callable tool + injected into the cycle prompt |
-| `Regular` | Coordinator LLM and agentic tools | Same as Internal, plus tools can request actions via the capability request protocol |
-
-**Built-in capabilities:**
-
-| Capability | Class | Description |
-|---|---|---|
-| `system-manager` | Core | Owns tool loading, LLM provider logging, cleanup job scheduling |
-| `communication` | Core | Allocates per-invocation IPC directories for tool subprocess communication |
-| `wallet` | Regular | Agent's Solana keypair — `address` and `sign` actions; address is auto-injected into tool payloads |
-| `solana` | Regular | Solana RPC: `get_balance`, `transfer_sol`, `get_recent_blockhash`, `send_transaction`, `get_account_info` |
-| `network-manager` | Regular | Declarative marker for tools that use outbound network access; no runtime actions |
-| `memory` | Internal | Persists plan, observations, pending tasks, and completed tasks across cycles |
+Values are injected into the tool's environment at runtime and redacted in
+`config list` output.
 
 ---
 
 ## Tools
 
-### Installing tools
+### Installing
 
 ```bash
-solai install token-price                       # latest release (core/curated tool)
-solai install token-price@v1.0.0               # specific version
-solai install owner/repo                        # third-party tool (latest release)
-solai install owner/repo@v1.0.0                # third-party tool (specific tag)
+solai install token-price              # latest curated release
+solai install token-price@v1.0.0       # specific version
+solai install owner/repo               # third-party tool from a GitHub release
+solai uninstall <name>
 ```
 
-Tools are downloaded from GitHub releases and stored in `~/.solai/tools/`. The release must include:
-
-- `manifest.json` — tool manifest with `"executable": "./bin/<name>"`
-- `<name>-linux-amd64` / `<name>-linux-arm64` — statically linked binary
-- `checksums.txt` (optional) — SHA256 checksums for verification
+Tools are stored in `~/.solai/tools/`. A release must contain `manifest.json`,
+`<name>-linux-<arch>` binaries, and (optionally) `checksums.txt`.
 
 ### Writing a tool
 
-Tools are standalone executables (any language) that communicate via file-based JSON IPC.
-
-**IPC protocol:**
-
-Before spawning a tool the coordinator allocates a temporary directory and sets `$SOLAI_IPC_DIR` in the tool's environment. The tool reads `$SOLAI_IPC_DIR/input.json` on startup, does its work, writes `$SOLAI_IPC_DIR/output.json`, and exits.
+Tools are standalone executables (any language) that communicate with the
+runtime over file-based JSON IPC. See `tools/tool-plan.md` for the full
+contract.
 
 ```json
-// $SOLAI_IPC_DIR/input.json  (coordinator → tool)
-{ "prompt": "One sentence describing the objective.", "payload": { "wallet_address": "ABC...XYZ" } }
+// $SOLAI_IPC_DIR/input.json  (runtime → tool)
+{ "prompt": "Objective for this tool call.", "payload": { "k": "v" } }
 ```
 
 ```json
-// $SOLAI_IPC_DIR/output.json  (tool → coordinator)
-{ "type": "success", "payload": <any JSON value> }
-{ "type": "error",   "payload": "human-readable error string" }
-{ "type": "request", "payload": { "capability": "<name>", "action": "<action>", "input": "<value>", "instruction": "<natural language for the coordinator>" } }
+// $SOLAI_IPC_DIR/output.json  (tool → runtime)
+{ "type": "success", "payload": <any JSON> }
+{ "type": "error",   "payload": "human-readable error" }
+{ "type": "request", "payload": { "capability": "<name>", "action": "<action>", "input": "<value>", "instruction": "<what to do next>" } }
 ```
 
-`success` and `error` are terminal. `request` is a capability request: the tool writes it and exits immediately. The coordinator reads the `instruction` field and follows it — typically by calling the named capability and re-invoking the tool with the result in `payload`. No re-invocation logic is hardcoded in tool binaries; the inner tool LLM composes the request dynamically.
+The tool reads `input.json`, writes the result **atomically**, and exits. Logs
+go to stderr only. The result is the file — not stdout. Go tools use the shared
+`github.com/melodyogonna/solai/ipc` package (`ipc.ReadInput`, `ipc.WriteSuccess`,
+`ipc.WriteError`, `ipc.WriteRequest`) to get the atomic write for free.
 
-Tool errors are returned as strings in `payload` so the coordinator LLM can observe them in the tool-calling loop and adapt.
-
-**manifest.json:**
+### manifest.json
 
 ```json
 {
@@ -220,54 +180,42 @@ Tool errors are returned as strings in `payload` so the coordinator LLM can obse
   "required_capabilities": ["network-manager"],
   "payloads": [
     { "name": "wallet_address", "description": "Solana wallet public key", "source": "wallet" }
-  ]
-}
-```
-
-`payloads` declares named values the tool expects in `input.json`'s `payload` map. Entries with a `source` field (e.g. `"wallet"`) are resolved automatically at load time by calling that capability — no LLM involvement. Entries without a `source` are supplied by the coordinator LLM on re-invocation when fulfilling a capability request.
-
-For tools that need runtime environment variables (e.g. API keys), declare them in `env`. The agent reads values from `tool-env.<name>.*` in the config and injects them into the tool's environment:
-
-```json
-{
-  "name": "birdeye",
-  "description": "...",
-  "version": "1.0.0",
-  "executable": "./bin/birdeye",
-  "required_capabilities": ["network-manager"],
+  ],
   "env": [
-    { "name": "BIRDEYE_API_KEY", "sensitive": true,  "required": true  },
-    { "name": "BIRDEYE_BASE_URL", "sensitive": false, "required": false }
+    { "name": "JUPITER_API_KEY", "sensitive": true, "required": false }
   ]
 }
 ```
 
-- `required: true` — the agent refuses to load the tool if the value is not set; a clear error message points to the fix command
-- `sensitive: true` — the value is redacted in `config list` output
-- Values are set with: `solai config set tool-env.birdeye.BIRDEYE_API_KEY <value>`
+`payloads` declares named values the tool expects in `input.json`'s `payload`
+map. Entries with a `source` (e.g. `"wallet"`) are resolved automatically;
+others are supplied by the coordinator when fulfilling a capability request.
 
-For tools that need their own LLM, add `llm_options`:
+### Adding a tool locally
 
-```json
-{
-  "name": "my-tool",
-  "description": "...",
-  "version": "1.0.0",
-  "executable": "./bin/my-tool",
-  "llm_options": {
-    "primary": "anthropic/claude-sonnet-4",
-    "supported": [
-      { "model": "anthropic/claude-sonnet-4" },
-      { "model": "openai/gpt-4o" }
-    ]
-  }
-}
+1. Create `~/.solai/tools/my-tool/manifest.json` (`executable` must be `"./bin/my-tool"`).
+2. Place the binary at `~/.solai/tools/my-tool/bin/my-tool` (chmod 0755).
+3. It is discovered on the next session that selects it.
+
+---
+
+## Architecture
+
+```
+client (curl) ─▶ solaid ──launch(cmd)──▶ agent runtime ──exec──▶ tool
+                   │                          │
+                   └── in-memory sessions     └── in-process capabilities
 ```
 
-The agent injects `SOLAI_LLM_MODEL`, `SOLAI_LLM_API_KEY`, and (optionally) `SOLAI_LLM_BASE_URL` into the tool's environment automatically. The OpenRouter model slugs (`vendor/model`) subsume the old provider split — any model reachable through OpenRouter can be listed.
+| Component | Responsibility |
+|---|---|
+| `solaid` | Control-plane HTTP/SSE API; session lifecycle; launches the runtime |
+| agent runtime | One session's goal loop; emits events |
+| `llm/` | Dependency-free OpenRouter client + native tool-calling loop |
+| `ipc/` | File-based tool IPC protocol: typed input/output, atomic writes |
+| `solai-agent/` | Session runtime (`session/`), control plane (`controlplane/`, `cmd/solaid`), and CLI (`cli/`) |
+| `tools/*` | Agentic tools |
+| `registry/` | Tool installation from GitHub releases |
+| `ratelimit/` | Retry and rate-limit strategies |
 
-### Adding a tool locally (without a GitHub release)
-
-1. Create `~/.solai/tools/my-tool/manifest.json` (see format above, `executable` must be `"./bin/my-tool"`).
-2. Place the binary at `~/.solai/tools/my-tool/bin/my-tool` (chmod 0755).
-3. The tool is discovered automatically on the next `solai start`.
+See `plan.md` for the full design and build order.

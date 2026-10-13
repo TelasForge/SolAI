@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/melodyogonna/solai/ipc"
 	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/ratelimit"
 )
@@ -199,21 +199,11 @@ func (t *dexTokenTool) Parameters() map[string]any {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	ipcDir := os.Getenv("SOLAI_IPC_DIR")
-	if ipcDir == "" {
-		fmt.Fprintln(os.Stderr, "SOLAI_IPC_DIR is not set")
-		os.Exit(1)
-	}
-	slog.Info("tool starting", "ipc_dir", ipcDir)
+	slog.Info("tool starting", "ipc_dir", ipc.Dir())
 
-	data, err := os.ReadFile(filepath.Join(ipcDir, "input.json"))
+	input, err := ipc.ReadInput()
 	if err != nil {
 		writeError(fmt.Sprintf("failed to read input: %v", err))
-		return
-	}
-	var input ToolInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		writeError(fmt.Sprintf("failed to parse input: %v", err))
 		return
 	}
 	slog.Info("input received", "prompt", input.Prompt)
@@ -254,8 +244,7 @@ func main() {
 	}
 
 	slog.Info("agent completed")
-	out, _ := json.Marshal(result)
-	writeSuccess(out)
+	writeSuccess(result)
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -434,18 +423,14 @@ func parseTokenList(input string) []string {
 	return strings.Split(input, ",")
 }
 
-func writeSuccess(data json.RawMessage) {
-	writeOutput(ToolOutput{Type: "success", Payload: data})
+func writeSuccess(payload any) {
+	if err := ipc.WriteSuccess(payload); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write output: %v\n", err)
+	}
 }
 
 func writeError(msg string) {
-	out, _ := json.Marshal(msg)
-	writeOutput(ToolOutput{Type: "error", Payload: out})
-}
-
-func writeOutput(out ToolOutput) {
-	data, _ := json.Marshal(out)
-	if err := os.WriteFile(filepath.Join(os.Getenv("SOLAI_IPC_DIR"), "output.json"), data, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write output.json: %v\n", err)
+	if err := ipc.WriteError(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write output: %v\n", err)
 	}
 }

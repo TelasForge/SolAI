@@ -7,12 +7,19 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/melodyogonna/solai/ipc"
 	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/solai-agent/capability"
 )
 
 // DefaultToolTimeout is the maximum time a single tool execution may run.
 const DefaultToolTimeout = 2 * time.Minute
+
+// Broker executes a capability requested by a tool. It is implemented by
+// capability.Broker.
+type Broker interface {
+	Execute(ctx context.Context, req ipc.Request) (string, error)
+}
 
 // AgenticTool implements llm.Tool. Each instance corresponds to one discovered
 // tool directory.
@@ -26,18 +33,20 @@ type AgenticTool struct {
 	commCap *capability.CommunicationCapability
 	// autoPayloads holds payload values pre-resolved at construction time
 	// (e.g. wallet_address from the wallet capability). They are merged into
-	// every tool invocation's ToolInput.Payloads map.
+	// every tool invocation's ipc.Input.Payload map.
 	autoPayloads map[string]string
 	// capabilitySection is appended to every prompt so the inner tool LLM
 	// knows what coordinator capabilities it can request and how to do so.
 	capabilitySection string
+	// broker executes capability requests emitted by the tool.
+	broker Broker
 }
 
 // NewAgenticTool constructs an AgenticTool from a manifest, its directory,
 // an optional LLM config, resolved env vars, a communication capability for
 // IPC directory management, pre-resolved auto payloads, and a capability
 // section to inject into every tool prompt.
-func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig, toolEnv []string, commCap *capability.CommunicationCapability, autoPayloads map[string]string, capabilitySection string) *AgenticTool {
+func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig, toolEnv []string, commCap *capability.CommunicationCapability, autoPayloads map[string]string, capabilitySection string, broker Broker) *AgenticTool {
 	timeout := DefaultToolTimeout
 	if manifest.Timeout != "" {
 		if d, err := time.ParseDuration(manifest.Timeout); err == nil && d > 0 {
@@ -53,6 +62,7 @@ func NewAgenticTool(manifest Manifest, dir string, llmCfg *capability.LLMConfig,
 		commCap:           commCap,
 		autoPayloads:      autoPayloads,
 		capabilitySection: capabilitySection,
+		broker:            broker,
 	}
 }
 
@@ -143,20 +153,51 @@ func (t *AgenticTool) Call(ctx context.Context, argsJSON string) (string, error)
 	slog.Info("tool exited", "tool", t.manifest.Name, "output_type", output.Type)
 
 	switch output.Type {
-	case "error":
+	case ipc.TypeError:
 		var errMsg string
 		if err := json.Unmarshal(output.Payload, &errMsg); err != nil {
 			errMsg = string(output.Payload)
 		}
 		slog.Warn("tool returned error", "tool", t.manifest.Name, "error", errMsg)
 		return fmt.Sprintf("Tool error: %s", errMsg), nil
-	case "request":
-		slog.Info("tool requested capability", "tool", t.manifest.Name, "payload", string(output.Payload))
-		return string(output.Payload), nil
+	case ipc.TypeRequest:
+		return t.brokerRequest(ctx, output.Payload), nil
 	}
 
 	slog.Debug("tool success payload", "tool", t.manifest.Name, "payload", string(output.Payload))
 	return string(output.Payload), nil
+}
+
+// brokerRequest executes the capability a tool asked for and returns a result
+// the coordinator can act on. If no broker is configured, the raw request is
+// returned so the coordinator may handle it itself.
+func (t *AgenticTool) brokerRequest(ctx context.Context, payload json.RawMessage) string {
+	if t.broker == nil {
+		return string(payload)
+	}
+	var req ipc.Request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return string(payload)
+	}
+
+	slog.Info("brokering capability request", "tool", t.manifest.Name,
+		"capability", req.Capability, "action", req.Action)
+
+	result, err := t.broker.Execute(ctx, req)
+	if err != nil {
+		slog.Warn("capability request failed", "tool", t.manifest.Name, "err", err)
+		out := fmt.Sprintf("Capability %q could not be executed: %v", req.Capability, err)
+		if req.Instruction != "" {
+			out += "\n\nInstruction: " + req.Instruction
+		}
+		return out
+	}
+
+	out := fmt.Sprintf("Capability %q result: %s", req.Capability, result)
+	if req.Instruction != "" {
+		out += "\n\nInstruction: " + req.Instruction
+	}
+	return out
 }
 
 var _ llm.Tool = (*AgenticTool)(nil)

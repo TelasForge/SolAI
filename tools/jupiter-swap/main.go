@@ -9,12 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/melodyogonna/solai/ipc"
 	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/ratelimit"
 )
@@ -199,21 +199,11 @@ func (t *jupiterSwapTxTool) Call(ctx context.Context, argsJSON string) (string, 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	ipcDir := os.Getenv("SOLAI_IPC_DIR")
-	if ipcDir == "" {
-		fmt.Fprintln(os.Stderr, "SOLAI_IPC_DIR is not set")
-		os.Exit(1)
-	}
-	slog.Info("tool starting", "ipc_dir", ipcDir)
+	slog.Info("tool starting", "ipc_dir", ipc.Dir())
 
-	data, err := os.ReadFile(filepath.Join(ipcDir, "input.json"))
+	input, err := ipc.ReadInput()
 	if err != nil {
 		writeError(fmt.Sprintf("failed to read input: %v", err))
-		return
-	}
-	var input ToolInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		writeError(fmt.Sprintf("failed to parse input: %v", err))
 		return
 	}
 	slog.Info("input received", "prompt", input.Prompt, "has_wallet", input.Payload["wallet_address"] != "")
@@ -262,18 +252,16 @@ func main() {
 	// Check if the agent's Final Answer is a capability request JSON.
 	// The inner LLM may decide to request a coordinator capability (e.g.
 	// signing a transaction) instead of producing a text result.
-	var capReq CapabilityRequest
+	var capReq ipc.Request
 	if err := json.Unmarshal([]byte(result), &capReq); err == nil &&
 		capReq.Capability != "" && capReq.Instruction != "" {
 		slog.Info("agent produced capability request", "capability", capReq.Capability, "action", capReq.Action)
-		payload, _ := json.Marshal(capReq)
-		writeRequest(payload)
+		writeRequest(capReq)
 		return
 	}
 
 	slog.Info("agent completed")
-	out, _ := json.Marshal(result)
-	writeSuccess(out)
+	writeSuccess(result)
 }
 
 // ---- HTTP helpers -----------------------------------------------------------
@@ -332,22 +320,20 @@ func stripMarkdownFence(s string) string {
 	return s
 }
 
-func writeSuccess(data json.RawMessage) {
-	writeOutput(ToolOutput{Type: "success", Payload: data})
+func writeSuccess(payload any) {
+	if err := ipc.WriteSuccess(payload); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write output: %v\n", err)
+	}
 }
 
 func writeError(msg string) {
-	out, _ := json.Marshal(msg)
-	writeOutput(ToolOutput{Type: "error", Payload: out})
+	if err := ipc.WriteError(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write output: %v\n", err)
+	}
 }
 
-func writeRequest(payload json.RawMessage) {
-	writeOutput(ToolOutput{Type: "request", Payload: payload})
-}
-
-func writeOutput(out ToolOutput) {
-	data, _ := json.Marshal(out)
-	if err := os.WriteFile(filepath.Join(os.Getenv("SOLAI_IPC_DIR"), "output.json"), data, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write output.json: %v\n", err)
+func writeRequest(req ipc.Request) {
+	if err := ipc.WriteRequest(req); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write output: %v\n", err)
 	}
 }

@@ -3,7 +3,6 @@ module github.com/melodyogonna/solai/solai-agent
 go 1.25.7
 
 require (
-	github.com/melodyogonna/solai/ratelimit v0.0.0-20260308202822-41b1e0268b33
 	github.com/mr-tron/base58 v1.2.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 )
@@ -33,6 +32,7 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/melodyogonna/solai/ipc v0.0.0
 	github.com/melodyogonna/solai/llm v0.0.0
 	github.com/mitchellh/go-testing-interface v1.14.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -52,3 +52,5 @@ require (
 )
 
 replace github.com/melodyogonna/solai/llm => ../llm
+
+replace github.com/melodyogonna/solai/ipc => ../ipc

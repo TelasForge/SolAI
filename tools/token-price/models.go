@@ -1,17 +1,5 @@
 package main
 
-import "encoding/json"
-
-type ToolInput struct {
-	Prompt  string            `json:"prompt"`
-	Payload map[string]string `json:"payload,omitempty"`
-}
-
-type ToolOutput struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
 // ---- Jupiter types ----------------------------------------------------------
 
 type jupiterEntry struct {

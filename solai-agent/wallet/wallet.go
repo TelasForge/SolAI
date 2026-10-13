@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/tyler-smith/go-bip39"
 )
@@ -57,8 +58,9 @@ func CreateWallet(phrase string) (SolKeyPair, error) {
 
 	slog.Info("generated wallet", "publicKey", wallet.Base58PubKey())
 
-	fmt.Print("---- Please store the following seed phrase securely and pass it in the next time SolAI is started --- \n\n")
-	fmt.Printf("%s", mnemonic)
+	// Write to stderr: stdout is reserved for the runtime's JSON event stream.
+	fmt.Fprint(os.Stderr, "---- Please store the following seed phrase securely and pass it in the next time SolAI is started --- \n\n")
+	fmt.Fprintf(os.Stderr, "%s\n", mnemonic)
 
 	return wallet, nil
 }

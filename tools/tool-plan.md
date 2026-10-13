@@ -65,10 +65,26 @@ a capability request.
 Write exactly one JSON object to `output.json` and exit. Never write anything to
 stdout (use stderr for logs).
 
-## The Shared `llm` Module
+Go tools should use the shared `github.com/melodyogonna/solai/ipc` package,
+which centralizes the protocol and writes `output.json` atomically (temp file +
+rename):
 
-Tools import `github.com/melodyogonna/solai/llm` for both the OpenRouter client
-and the agent loop. There are no third-party LLM dependencies.
+```go
+in, err := ipc.ReadInput()                 // reads $SOLAI_IPC_DIR/input.json
+// ... do work ...
+ipc.WriteSuccess(result)                   // or WriteError(msg) / WriteRequest(req)
+```
+
+The runtime treats a valid `output.json` as the result regardless of the exit
+code, so a tool may `exit 1` after writing a structured `error` and the
+coordinator will surface that error. A missing or malformed `output.json` is an
+infrastructure error.
+
+## The Shared `llm` and `ipc` Modules
+
+Tools import `github.com/melodyogonna/solai/llm` for the OpenRouter client and
+the agent loop, and `github.com/melodyogonna/solai/ipc` for the file protocol.
+There are no third-party LLM dependencies.
 
 ```go
 import "github.com/melodyogonna/solai/llm"
@@ -89,8 +105,7 @@ if err != nil { ... }
 ```
 
 The agent advertises each tool through native function calling; the model
-returns structured `tool_calls` and the loop executes them. There is no ReAct
-text format and therefore no parse-error recovery to write.
+returns structured `tool_calls` and the loop executes them.
 
 ### Implementing a Tool
 
@@ -152,13 +167,12 @@ transaction), it writes a `"request"` output to `output.json` and exits
 immediately — no blocking.
 
 ```go
-capReq, _ := json.Marshal(CapabilityRequest{
+ipc.WriteRequest(ipc.Request{
     Capability:  "solana",
     Action:      "send_transaction",
     Input:       unsignedTxBase64,
     Instruction: "Re-invoke this tool with the signed transaction in payloads.transaction.",
 })
-writeRequest(json.RawMessage(capReq))
 ```
 
 The coordinator reads the request, calls the named capability, then follows the
@@ -173,8 +187,8 @@ request.
 ## Checklist for a New Tool
 
 - [ ] `manifest.json` with correct `required_capabilities` and (if it uses an LLM) `llm_options`
-- [ ] Read input from `$SOLAI_IPC_DIR/input.json` as `ToolInput{Prompt, Payload}`
-- [ ] Write exactly one JSON object to `$SOLAI_IPC_DIR/output.json` (`success`, `error`, or `request`) and exit
+- [ ] Read input with `ipc.ReadInput()` (or `$SOLAI_IPC_DIR/input.json`)
+- [ ] Write the result with `ipc.WriteSuccess` / `ipc.WriteError` / `ipc.WriteRequest` (atomic)
 - [ ] Implement `llm.Tool` (`Name`, `Description`, `Call`) and, when useful, `Parameters`
 - [ ] Construct the client with `llm.FromEnv()` and the agent with `llm.NewAgent`
 - [ ] If using capability requests: emit a `"request"` output with a clear `instruction`

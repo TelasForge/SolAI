@@ -75,6 +75,12 @@ func (m *CapabilityManager) IsRegularCapabilityAvailable(name string) bool {
 	return false
 }
 
+// BuiltinNames returns the capability names a session may select. It is used
+// by the control plane to advertise available capabilities.
+func BuiltinNames() []string {
+	return []string{"wallet", "solana", "network-manager", "memory"}
+}
+
 // capabilityTool adapts a Capability to the llm.Tool interface so Internal and
 // Regular capabilities can be called by the LLM via native tool calling.
 type capabilityTool struct{ c Capability }

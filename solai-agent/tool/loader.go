@@ -49,6 +49,9 @@ func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *ca
 	// Build the capability section once; it's the same for all tools in this agent.
 	capabilitySection := capManager.BuildToolRequestSection()
 
+	// The broker performs capability requests on behalf of every tool.
+	broker := capability.NewBroker(capManager)
+
 	var loaded []llm.Tool
 	var warnings []error
 
@@ -108,7 +111,7 @@ func LoadTools(toolsDir string, provider *capability.LLMProvider, capManager *ca
 		}
 
 		autoPayloads := resolveAutoPayloads(manifest, capManager)
-		loaded = append(loaded, NewAgenticTool(manifest, toolDir, llmCfg, toolEnv, commCap, autoPayloads, capabilitySection))
+		loaded = append(loaded, NewAgenticTool(manifest, toolDir, llmCfg, toolEnv, commCap, autoPayloads, capabilitySection, broker))
 	}
 
 	return loaded, warnings, nil
