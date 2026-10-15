@@ -10,7 +10,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 // Environment variables the runtime reads.
@@ -33,9 +32,6 @@ const (
 
 	// EnvCommitment is the Solana commitment level.
 	EnvCommitment = "SOLAI_COMMITMENT"
-
-	// EnvToolsDir is the directory containing installed agentic tools.
-	EnvToolsDir = "SOLAI_TOOLS_DIR"
 )
 
 // Defaults for optional settings.
@@ -52,7 +48,6 @@ type Config struct {
 	WalletSeed        string
 	RPCURL            string
 	Commitment        string
-	ToolsDir          string
 }
 
 // FromEnv reads configuration from the process environment.
@@ -64,25 +59,7 @@ func FromEnv() Config {
 		WalletSeed:        os.Getenv(EnvWalletSeed),
 		RPCURL:            envOr(EnvRPCURL, DefaultRPCURL),
 		Commitment:        envOr(EnvCommitment, DefaultCommitment),
-		ToolsDir:          ToolsDir(),
 	}
-}
-
-// ToolsDir returns the configured tools directory. It falls back to /tools
-// when that directory exists (the conventional container mount), otherwise
-// ~/.solai/tools.
-func ToolsDir() string {
-	if v := os.Getenv(EnvToolsDir); v != "" {
-		return v
-	}
-	if info, err := os.Stat("/tools"); err == nil && info.IsDir() {
-		return "/tools"
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "tools"
-	}
-	return filepath.Join(home, ".solai", "tools")
 }
 
 // Validate reports the first required setting that is missing.

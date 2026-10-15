@@ -12,7 +12,6 @@ func TestFromEnv_ReadsAllVariables(t *testing.T) {
 	t.Setenv(EnvWalletSeed, "word1 word2")
 	t.Setenv(EnvRPCURL, "https://rpc.example.test")
 	t.Setenv(EnvCommitment, "finalized")
-	t.Setenv(EnvToolsDir, "/opt/tools")
 
 	cfg := FromEnv()
 	if cfg.Model != "anthropic/claude-sonnet-4" {
@@ -33,15 +32,11 @@ func TestFromEnv_ReadsAllVariables(t *testing.T) {
 	if cfg.Commitment != "finalized" {
 		t.Errorf("Commitment: got %q", cfg.Commitment)
 	}
-	if cfg.ToolsDir != "/opt/tools" {
-		t.Errorf("ToolsDir: got %q", cfg.ToolsDir)
-	}
 }
 
 func TestFromEnv_Defaults(t *testing.T) {
-	for _, key := range []string{EnvRPCURL, EnvCommitment, EnvToolsDir} {
-		t.Setenv(key, "")
-	}
+	t.Setenv(EnvRPCURL, "")
+	t.Setenv(EnvCommitment, "")
 	cfg := FromEnv()
 	if cfg.RPCURL != DefaultRPCURL {
 		t.Errorf("RPCURL: got %q, want %q", cfg.RPCURL, DefaultRPCURL)
@@ -49,14 +44,10 @@ func TestFromEnv_Defaults(t *testing.T) {
 	if cfg.Commitment != DefaultCommitment {
 		t.Errorf("Commitment: got %q, want %q", cfg.Commitment, DefaultCommitment)
 	}
-	if cfg.ToolsDir == "" {
-		t.Error("ToolsDir: expected a fallback")
-	}
 }
 
 func TestValidate(t *testing.T) {
 	base := Config{Model: "m", OpenRouterAPIKey: "k", Commitment: "confirmed"}
-
 	if err := base.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/melodyogonna/solai/config"
 	"github.com/melodyogonna/solai/session"
 )
 
@@ -38,17 +39,20 @@ type Session struct {
 type Manager struct {
 	launcher Launcher
 	ctx      context.Context
+	cfg      config.Config
 
 	mu       sync.Mutex
 	sessions map[string]*sessionState
 }
 
 // NewManager creates a manager. ctx is the parent context for every launched
-// runtime, so cancelling it stops all sessions.
-func NewManager(ctx context.Context, launcher Launcher) *Manager {
+// runtime, so cancelling it stops all sessions. cfg supplies the values that
+// capabilities are provisioned from.
+func NewManager(ctx context.Context, cfg config.Config, launcher Launcher) *Manager {
 	return &Manager{
 		launcher: launcher,
 		ctx:      ctx,
+		cfg:      cfg,
 		sessions: make(map[string]*sessionState),
 	}
 }
@@ -59,12 +63,17 @@ func (m *Manager) Create(spec session.Spec) (*Session, error) {
 		return nil, ErrNoGoals
 	}
 
+	env, err := provision(spec.Capabilities, m.cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	st := newSessionState(newID(), spec)
 	m.mu.Lock()
 	m.sessions[st.id] = st
 	m.mu.Unlock()
 
-	proc, err := m.launcher.Start(m.ctx, spec)
+	proc, err := m.launcher.Start(m.ctx, spec, env)
 	if err != nil {
 		st.finishWith(session.StatusFailed)
 		return st.view(), err

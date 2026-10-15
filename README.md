@@ -1,16 +1,16 @@
 # SolAI
 
-> **Status:** SolAI is implemented as a minimal agent harness. See `plan.md` for
-> the design and `AGENTS.md` for contributor guidance.
+> **Status:** SolAI is a minimal agent harness. See `plan.md` for the design and
+> `AGENTS.md` for contributor guidance.
 
 SolAI runs long-lived Solana agents. A **session** has one or more **goals** and
-a selection of **tools** and **capabilities**, and the agent works continuously
-until the goals are resolved or the session is stopped. LLM access is via
+a selection of **tools**, and the agent works continuously until the goals are
+resolved or the session is stopped. LLM access is via
 [OpenRouter](https://openrouter.ai).
 
-SolAI is not a CLI. The runtime is launched by a control plane and receives its
-configuration from the environment, the way a container receives its
-configuration from the platform that schedules it.
+SolAI is not a CLI. Tools are compiled into the runtime and called in-process.
+The runtime receives its configuration from the environment, the way a container
+receives its configuration from the platform that schedules it.
 
 ---
 
@@ -18,34 +18,36 @@ configuration from the platform that schedules it.
 
 | Binary | Role |
 |---|---|
-| `solaid` | Control-plane HTTP/SSE API. Creates, launches, and tracks sessions. |
+| `solaid` | Control-plane HTTP/SSE API. Creates, launches, and tracks sessions, and provisions capabilities into their environment. |
 | `solai` | Session runtime. Reads a spec from stdin, emits events on stdout. Launched by `solaid`. |
 
 Sandboxing is **not** part of this code. The control plane launches each
 session as a command, and the operator points that command at their own
-infrastructure (for example a microVM runner). The runtime and tools only ever
-launch commands; where those commands run is the platform's concern.
+infrastructure (for example a microVM runner). The runtime only launches
+commands; where those commands run is the platform's concern.
 
 ---
 
 ## Concepts
 
-- **Session** — one long-running agent run: goals, model, tools, capabilities.
-  It runs until the goals are done or it is stopped.
+- **Session** — one long-running agent run: goals, model, tools.
 - **Goal** — a task the session must accomplish. The agent works through goals
   one at a time and explicitly marks each `complete`, `fail`, or `block`.
-- **Tool** — a standalone executable with a `manifest.json`. Tools are selected
-  per session.
-- **Capability** — a system feature (wallet, Solana RPC, memory) selected per
-  session. Capabilities are exposed to the coordinator as tools and are
-  reachable by agentic tools through the `request` protocol: the tool emits a
-  request and the runtime's broker performs it.
+- **Tool** — an in-process capability the model can call (for example
+  `jupiter-price` or `solana`). Tools are compiled in and selected per session.
+- **MCP server** — an external [Model Context Protocol](https://modelcontextprotocol.io)
+  server. Its tools are discovered at session start and exposed alongside the
+  built-in tools, namespaced as `<server>__<tool>`.
+- **Capability** — an infrastructure authority the control plane *provisions*
+  into a session's environment (network egress, Solana RPC access, wallet
+  signing). The runtime never sees the capability; it only sees the environment
+  it was given.
 
 ---
 
 ## Running
 
-Configuration is injected through environment variables (see
+Configuration comes from the environment (see
 [Configuration](#configuration)); the session itself is a JSON spec.
 
 ### Runtime
@@ -61,12 +63,15 @@ solai < session.json
 {
   "goals": ["Monitor SOL price and report significant moves"],
   "model": "anthropic/claude-sonnet-4",
-  "tools": ["token-price"],
-  "capabilities": ["wallet", "solana", "memory"]
+  "tools": ["jupiter-price"],
+  "mcp_servers": [{ "name": "jupiter", "url": "http://jupiter-mcp:8080" }]
 }
 ```
 
-`model` overrides `SOLAI_MODEL` for this session.
+`model` overrides `SOLAI_MODEL` for this session. An empty `tools` list exposes
+every registered tool. Each `mcp_servers` entry is connected at session start
+and its tools are exposed as `<server>__<tool>` (for example
+`jupiter__quote`).
 
 ### Control plane
 
@@ -76,17 +81,17 @@ solaid --addr 127.0.0.1:8787 --launch "solai"
 # Start a session
 curl -sX POST localhost:8787/sessions -d '{
   "goals": ["Monitor SOL and report big moves"],
-  "tools": ["token-price"],
-  "capabilities": ["wallet", "solana", "memory", "network-manager"]
+  "tools": ["jupiter-price"],
+  "capabilities": ["network", "rpc"]
 }'
 
 # Watch it live
 curl -N localhost:8787/sessions/<id>/events
 ```
 
-`solaid` inherits its environment, so the runtime it launches gets the same
-injected configuration. Point `--launch` at a wrapper (e.g. a microVM runner)
-to isolate sessions.
+`solaid` inherits its environment, and for each session it adds the environment
+granted by the requested capabilities before launching the runtime. Point
+`--launch` at a wrapper (e.g. a microVM runner) to isolate sessions.
 
 ### API
 
@@ -96,7 +101,7 @@ GET    /sessions                 list
 GET    /sessions/{id}            status + goals
 POST   /sessions/{id}/stop
 GET    /sessions/{id}/events     SSE live event stream
-GET    /tools                    available tools
+GET    /tools                    registered tools
 GET    /capabilities             available capabilities
 ```
 
@@ -109,93 +114,81 @@ Everything is read from the process environment. There is no config file.
 | Variable | Required | Description |
 |---|---|---|
 | `SOLAI_MODEL` | yes | OpenRouter model slug (e.g. `anthropic/claude-sonnet-4`) |
-| `OPENROUTER_API_KEY` | yes | OpenRouter API key (shared by the agent and tools) |
+| `OPENROUTER_API_KEY` | yes | OpenRouter API key |
 | `SOLAI_OPENROUTER_BASE_URL` | no | Override the OpenRouter API root |
-| `SOLAI_WALLET_SEED` | no | BIP39 mnemonic; a new wallet is generated if unset |
+| `SOLAI_WALLET_SEED` | no | BIP39 mnemonic for the agent wallet |
 | `SOLAI_RPC_URL` | no | Solana RPC endpoint (default `https://api.mainnet-beta.solana.com`) |
 | `SOLAI_COMMITMENT` | no | `finalized`, `confirmed`, or `processed` (default `confirmed`) |
-| `SOLAI_TOOLS_DIR` | no | Directory containing installed tools (default `/tools`, else `~/.solai/tools`) |
-| `SOLAI_LOG_LEVEL` | no | `debug`, `info`, `warn`, or `error` (default `info`) |
+| `SOLAI_LOG_LEVEL` | no | `debug`, `info`, `warn`, or `error` |
 | `SOLAI_LAUNCH_CMD` | no | Runtime launch command used by `solaid` (default `solai`) |
 
-A platform injects these the same way it injects any other container
-configuration (Kubernetes `env`, a secret, a mounted file rendered into a
-variable, and so on).
+Individual tools may read their own environment variables (for example
+`JUPITER_API_KEY`); the platform injects them the same way.
+
+---
+
+## Capabilities
+
+A capability is a grant the control plane provisions into a session's
+environment. The runtime does not enforce it; the platform does. In a real
+deployment each capability maps to sandbox policy (network egress, mounts,
+secrets) in addition to environment variables.
+
+| Capability | Grants |
+|---|---|
+| `network` | Outbound network access (platform-enforced) |
+| `rpc` | `SOLAI_RPC_URL`, `SOLAI_COMMITMENT` |
+| `wallet` | `SOLAI_WALLET_SEED` |
 
 ---
 
 ## Tools
 
-### Layout
+Tools are Go values implementing `llm.Tool` (`Name`, `Description`,
+`Parameters`, `Call`), registered at compile time and called directly. There are
+no manifests, no subprocesses, and no IPC.
 
-Tools live in `SOLAI_TOOLS_DIR`, populated by the environment (a mounted
-volume, the image, or an init container):
+Adding a tool:
 
+```go
+package mytool
+
+func init() {
+    tool.Register("my-tool", "What it does, for the model.", func() llm.Tool {
+        return &myTool{}
+    })
+}
+
+type myTool struct{}
+
+func (t *myTool) Name() string        { return "my-tool" }
+func (t *myTool) Description() string { return "..." }
+func (t *myTool) Parameters() map[string]any { /* JSON Schema */ }
+func (t *myTool) Call(ctx context.Context, argsJSON string) (string, error) {
+    // parse argsJSON, return a JSON result
+}
 ```
-$SOLAI_TOOLS_DIR/<name>/
-  manifest.json
-  bin/<name>
-```
 
-### Tool environment variables
+Then add the package to the blank imports in `tools/tools.go`.
 
-A tool declares the variables it needs in its manifest. The runtime resolves
-them from its own environment and injects them into the tool subprocess:
+### MCP servers
+
+External integrations can be provided by MCP servers instead of compiled-in
+tools. Add them to the session spec:
 
 ```json
 {
-  "env": [
-    { "name": "JUPITER_API_KEY", "sensitive": true, "required": false }
+  "goals": ["Quote a swap"],
+  "mcp_servers": [
+    { "name": "jupiter", "url": "http://jupiter-mcp:8080" }
   ]
 }
 ```
 
-A missing variable marked `required` disables the tool with a warning.
-
-### Writing a tool
-
-Tools are standalone executables (any language) that communicate with the
-runtime over file-based JSON IPC. See `tools/tool-plan.md` for the full
-contract.
-
-```json
-// $SOLAI_IPC_DIR/input.json  (runtime → tool)
-{ "prompt": "Objective for this tool call.", "payload": { "k": "v" } }
-```
-
-```json
-// $SOLAI_IPC_DIR/output.json  (tool → runtime)
-{ "type": "success", "payload": <any JSON> }
-{ "type": "error",   "payload": "human-readable error" }
-{ "type": "request", "payload": { "capability": "<name>", "action": "<action>", "input": "<value>", "instruction": "<what to do next>" } }
-```
-
-The tool reads `input.json`, writes the result **atomically**, and exits. Logs
-go to stderr only. The result is the file — not stdout. Go tools use the shared
-`github.com/melodyogonna/solai/ipc` package (`ipc.ReadInput`, `ipc.WriteSuccess`,
-`ipc.WriteError`, `ipc.WriteRequest`) to get the atomic write for free.
-
-### manifest.json
-
-```json
-{
-  "name": "token-price",
-  "description": "Fetches current USD prices for Solana tokens from Jupiter.",
-  "version": "1.0.0",
-  "executable": "./bin/token-price",
-  "required_capabilities": ["network-manager"],
-  "payloads": [
-    { "name": "wallet_address", "description": "Solana wallet public key", "source": "wallet" }
-  ],
-  "env": [
-    { "name": "JUPITER_API_KEY", "sensitive": true, "required": false }
-  ]
-}
-```
-
-`payloads` declares named values the tool expects in `input.json`'s `payload`
-map. Entries with a `source` (e.g. `"wallet"`) are resolved automatically;
-others are supplied by the coordinator when fulfilling a capability request.
+The runtime connects over the MCP **Streamable HTTP** transport, discovers each
+server's tools, and adds them to the coordinator's toolset. Names are namespaced
+`<server>__<tool>` to avoid collisions, and a server's `inputSchema` is used
+verbatim. The runtime is a plain MCP client — no SDK is required.
 
 ---
 
@@ -214,26 +207,25 @@ All Go code is a single module at the repo root
 ## Architecture
 
 ```
-client (curl) ─▶ solaid ──launch(cmd)──▶ agent runtime ──exec──▶ tool
-                   │                          │
-                   └── in-memory sessions     └── in-process capabilities
+client (curl) ─▶ solaid ──launch(cmd + capability env)──▶ solai runtime
+                   │                                          │
+                   └── in-memory sessions                     └── in-process tools
 ```
 
 | Component | Responsibility |
 |---|---|
 | `cmd/solaid` | Control-plane binary |
 | `cmd/solai` | Session runtime binary |
-| `controlplane/` | Session manager, launcher, HTTP/SSE server |
+| `controlplane/` | Session manager, capability provisioning, launcher, HTTP/SSE server |
 | `session/` | Session spec, event stream, continuous goal loop |
 | `runtime/` | Wires environment configuration and a spec into a session |
 | `llm/` | Dependency-free OpenRouter client + native tool-calling loop |
-| `ipc/` | File-based tool IPC protocol: typed input/output, atomic writes |
-| `capability/` | Wallet, Solana RPC, memory, tool IPC, and the capability broker |
-| `tool/` | Tool discovery, manifest parsing, subprocess execution |
+| `tool/` | In-process tool registry |
+| `mcp/` | Minimal MCP client: JSON-RPC over Streamable HTTP, tool discovery, adapters |
+| `tools/` | Built-in tools (solana, wallet, jupiter, raydium, tokenprice) |
 | `wallet/` | BIP39 seed derivation and ed25519 keypair |
 | `config/` | Environment-based configuration |
 | `prompts/` | Embedded system prompt |
-| `registry/` | Tool installation from GitHub releases (library) |
 | `ratelimit/` | Retry and rate-limit strategies |
 
 See `plan.md` for the full design.

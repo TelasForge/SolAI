@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 
 	"github.com/melodyogonna/solai/session"
@@ -13,10 +14,13 @@ import (
 // Launcher starts a session runtime. This is the sandbox seam: the control
 // plane only launches a command. To isolate sessions, the operator points the
 // command at their own infrastructure (e.g. a microVM wrapper).
+//
+// env holds the environment assignments provisioned for the session's
+// capabilities; the launcher merges them into the process environment.
 type Launcher interface {
 	// Start begins a runtime for spec and returns its process. The spec is
 	// delivered on stdin; events are read from Events().
-	Start(ctx context.Context, spec session.Spec) (RuntimeProcess, error)
+	Start(ctx context.Context, spec session.Spec, env []string) (RuntimeProcess, error)
 }
 
 // RuntimeProcess is a running session runtime.
@@ -42,7 +46,7 @@ type ExecLauncher struct {
 }
 
 // Start implements Launcher.
-func (l ExecLauncher) Start(ctx context.Context, spec session.Spec) (RuntimeProcess, error) {
+func (l ExecLauncher) Start(ctx context.Context, spec session.Spec, env []string) (RuntimeProcess, error) {
 	payload, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err
@@ -50,6 +54,9 @@ func (l ExecLauncher) Start(ctx context.Context, spec session.Spec) (RuntimeProc
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", l.Command)
 	cmd.Stdin = bytes.NewReader(payload)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if l.Stderr != nil {
 		cmd.Stderr = l.Stderr
 	}

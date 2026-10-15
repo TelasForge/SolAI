@@ -18,6 +18,7 @@ import (
 
 	"github.com/melodyogonna/solai/config"
 	"github.com/melodyogonna/solai/controlplane"
+	_ "github.com/melodyogonna/solai/tools"
 )
 
 func main() {
@@ -29,11 +30,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	mgr := controlplane.NewManager(ctx, controlplane.ExecLauncher{
+	mgr := controlplane.NewManager(ctx, config.FromEnv(), controlplane.ExecLauncher{
 		Command: *launch,
 		Stderr:  os.Stderr,
 	})
-	handler := controlplane.NewServer(mgr, config.ToolsDir()).Handler()
+	handler := controlplane.NewServer(mgr).Handler()
 
 	srv := &http.Server{
 		Addr:              *addr,

@@ -40,6 +40,18 @@ type Goal struct {
 	Note   string     `json:"note,omitempty"`
 }
 
+// MCPServer configures one Model Context Protocol server.
+type MCPServer struct {
+	// Name namespaces the server's tools (e.g. "jupiter" -> "jupiter__quote").
+	Name string `json:"name"`
+
+	// URL is the Streamable HTTP endpoint.
+	URL string `json:"url"`
+
+	// Headers are sent with every request (e.g. Authorization).
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
 // Spec is the input to a session. It is the entire user-facing configuration
 // surface: what to accomplish, which model, and which tools/capabilities are
 // available.
@@ -54,12 +66,18 @@ type Spec struct {
 	Model string `json:"model"`
 
 	// Tools are the tool names to expose to the model. Empty means all
-	// discovered tools.
+	// registered tools.
 	Tools []string `json:"tools,omitempty"`
 
-	// Capabilities are the capability names available to the session (and, via
-	// the request protocol, to its tools).
+	// Capabilities are the infrastructure authorities the control plane
+	// provisions into the session's environment (network, rpc, wallet). The
+	// runtime never sees this list; it only sees the resulting environment.
 	Capabilities []string `json:"capabilities,omitempty"`
+
+	// MCPServers are Model Context Protocol servers whose tools the session
+	// should expose. The runtime connects to them at session start and adds
+	// their tools alongside the registered ones.
+	MCPServers []MCPServer `json:"mcp_servers,omitempty"`
 
 	// SystemPrompt overrides the runtime's default system prompt when non-empty.
 	SystemPrompt string `json:"system_prompt,omitempty"`

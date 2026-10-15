@@ -3,6 +3,5 @@
 
 # Build outputs
 .out/
-tools/*/bin/
 sample.json
 test-ledger/

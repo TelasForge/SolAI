@@ -5,7 +5,6 @@ go 1.25.7
 require (
 	github.com/gagliardetto/binary v0.8.0
 	github.com/gagliardetto/solana-go v1.14.0
-	github.com/joho/godotenv v1.5.1
 	github.com/mr-tron/base58 v1.2.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 )

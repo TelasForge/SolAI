@@ -1,8 +1,8 @@
 // Package runtime wires an environment configuration and a session spec into a
 // runnable session.
 //
-// It is the sandbox-unaware core of the runtime binary: it launches tools as
-// commands and never performs isolation itself.
+// It is the sandbox-unaware core of the runtime binary: tools are compiled in
+// and called in-process, so it performs no isolation itself.
 package runtime
 
 import (
@@ -10,13 +10,15 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/melodyogonna/solai/capability"
 	"github.com/melodyogonna/solai/config"
 	"github.com/melodyogonna/solai/llm"
+	"github.com/melodyogonna/solai/mcp"
 	"github.com/melodyogonna/solai/prompts"
 	"github.com/melodyogonna/solai/session"
 	"github.com/melodyogonna/solai/tool"
-	"github.com/melodyogonna/solai/wallet"
+
+	// Register the built-in tools.
+	_ "github.com/melodyogonna/solai/tools"
 )
 
 // Run builds and runs one session to completion, emitting events to emit.
@@ -45,48 +47,28 @@ func Run(ctx context.Context, cfg config.Config, spec session.Spec, emit session
 		return fmt.Errorf("initializing LLM: %w", err)
 	}
 
-	kp, err := wallet.CreateWallet(cfg.WalletSeed)
-	if err != nil {
-		return fmt.Errorf("creating wallet: %w", err)
-	}
-	registerCapabilities(&kp, cfg)
-	capManager := capability.SetUp(spec.Capabilities)
+	tools := tool.SetUp(spec.Tools)
 
-	provider := capability.NewLLMProvider(cfg.OpenRouterAPIKey, cfg.OpenRouterBaseURL)
-	allTools, warnings, err := tool.LoadTools(cfg.ToolsDir, provider, capManager)
-	if err != nil {
-		return fmt.Errorf("loading tools: %w", err)
+	if len(spec.MCPServers) > 0 {
+		mcpClient, err := mcp.Connect(ctx, toMCPServers(spec.MCPServers))
+		if err != nil {
+			return fmt.Errorf("connecting MCP servers: %w", err)
+		}
+		defer mcpClient.Close()
+		tools = append(tools, mcpClient.Tools()...)
+		slog.Info("mcp tools loaded", "servers", len(spec.MCPServers), "tools", len(mcpClient.Tools()))
 	}
-	for _, w := range warnings {
-		slog.Warn("tool setup warning", "err", w)
-	}
-
-	// The coordinator can call the selected capabilities directly, plus the
-	// selected agentic tools.
-	agentTools := append(capManager.GetAgentTools(), tool.Select(allTools, spec.Tools)...)
 
 	slog.Info("session starting", "model", cfg.Model, "goals", len(spec.Goals),
-		"tools", len(agentTools), "wallet", kp.Base58PubKey())
+		"tools", len(tools))
 
-	return session.New(spec, client, agentTools, emit).Run(ctx)
+	return session.New(spec, client, tools, emit).Run(ctx)
 }
 
-// registerCapabilities registers the built-in capability factories. The set a
-// session may actually use is chosen via capability.SetUp.
-func registerCapabilities(kp *wallet.SolKeyPair, cfg config.Config) {
-	capability.Register("communication", func() capability.Capability {
-		return capability.NewCommunicationCapability()
-	})
-	capability.Register("wallet", func() capability.Capability {
-		return capability.NewWalletCapability(kp)
-	})
-	capability.Register("solana", func() capability.Capability {
-		return capability.NewSolanaCapability(kp, cfg.RPCURL, cfg.Commitment)
-	})
-	capability.Register("network-manager", func() capability.Capability {
-		return capability.NewNetworkManagerCapability()
-	})
-	capability.Register("memory", func() capability.Capability {
-		return capability.NewMemoryCapability()
-	})
+func toMCPServers(servers []session.MCPServer) []mcp.Server {
+	out := make([]mcp.Server, len(servers))
+	for i, s := range servers {
+		out[i] = mcp.Server{Name: s.Name, URL: s.URL, Headers: s.Headers}
+	}
+	return out
 }

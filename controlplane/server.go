@@ -6,21 +6,19 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/melodyogonna/solai/capability"
 	"github.com/melodyogonna/solai/session"
 	"github.com/melodyogonna/solai/tool"
 )
 
 // Server exposes the control-plane HTTP API.
 type Server struct {
-	mgr      *Manager
-	toolsDir string
-	mux      *http.ServeMux
+	mgr *Manager
+	mux *http.ServeMux
 }
 
 // NewServer builds a control-plane server.
-func NewServer(mgr *Manager, toolsDir string) *Server {
-	s := &Server{mgr: mgr, toolsDir: toolsDir, mux: http.NewServeMux()}
+func NewServer(mgr *Manager) *Server {
+	s := &Server{mgr: mgr, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -47,7 +45,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 
 	view, err := s.mgr.Create(spec)
 	switch {
-	case errors.Is(err, ErrNoGoals):
+	case errors.Is(err, ErrNoGoals), errors.Is(err, ErrUnknownCapability):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -141,34 +139,12 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// toolView is the compact tool representation returned by GET /tools.
-type toolView struct {
-	Name                 string   `json:"name"`
-	Description          string   `json:"description"`
-	Version              string   `json:"version"`
-	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
-}
-
 func (s *Server) listTools(w http.ResponseWriter, r *http.Request) {
-	manifests, err := tool.List(s.toolsDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	views := make([]toolView, 0, len(manifests))
-	for _, m := range manifests {
-		views = append(views, toolView{
-			Name:                 m.Name,
-			Description:          m.Description,
-			Version:              m.Version,
-			RequiredCapabilities: m.RequiredCapabilities,
-		})
-	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, tool.Summaries())
 }
 
 func (s *Server) listCapabilities(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, capability.BuiltinNames())
+	writeJSON(w, http.StatusOK, CapabilityNames())
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

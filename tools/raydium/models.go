@@ -1,4 +1,4 @@
-package main
+package raydium
 
 // ---- Raydium v3 API types ---------------------------------------------------
 
@@ -41,7 +41,7 @@ type PoolStats struct {
 	RewardAPR []float64 `json:"rewardApr"`
 }
 
-// PoolSummary is the condensed view returned to the agent.
+// PoolSummary is the condensed view returned to the coordinator.
 type PoolSummary struct {
 	PoolID       string  `json:"pool_id"`
 	Type         string  `json:"type"`

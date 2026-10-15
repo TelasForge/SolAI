@@ -6,14 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/melodyogonna/solai/config"
+	"github.com/melodyogonna/solai/llm"
 	"github.com/melodyogonna/solai/session"
+	"github.com/melodyogonna/solai/tool"
 )
 
 // ---- fakes ------------------------------------------------------------------
@@ -44,10 +45,12 @@ type fakeLauncher struct {
 	proc   RuntimeProcess
 	err    error
 	specs  []session.Spec
+	envs   [][]string
 }
 
-func (l *fakeLauncher) Start(_ context.Context, spec session.Spec) (RuntimeProcess, error) {
+func (l *fakeLauncher) Start(_ context.Context, spec session.Spec, env []string) (RuntimeProcess, error) {
 	l.specs = append(l.specs, spec)
+	l.envs = append(l.envs, env)
 	if l.err != nil {
 		return nil, l.err
 	}
@@ -57,16 +60,23 @@ func (l *fakeLauncher) Start(_ context.Context, spec session.Spec) (RuntimeProce
 	return &staticProc{r: strings.NewReader(l.events)}, nil
 }
 
+type stubTool struct{ name string }
+
+func (t *stubTool) Name() string                                 { return t.name }
+func (t *stubTool) Description() string                          { return t.name }
+func (t *stubTool) Call(context.Context, string) (string, error) { return "", nil }
+
 const doneEvents = `{"type":"session.started","status":"running"}
 {"type":"goal.started","goal_id":"g1","message":"do it"}
 {"type":"goal.done","goal_id":"g1","status":"done","message":"finished"}
 {"type":"session.done","status":"done"}
 `
 
-func newTestServer(t *testing.T, l Launcher, toolsDir string) *httptest.Server {
+func newTestServer(t *testing.T, l Launcher) *httptest.Server {
 	t.Helper()
-	mgr := NewManager(context.Background(), l)
-	srv := httptest.NewServer(NewServer(mgr, toolsDir).Handler())
+	cfg := config.Config{RPCURL: "https://rpc.test", Commitment: "confirmed", WalletSeed: "seed"}
+	mgr := NewManager(context.Background(), cfg, l)
+	srv := httptest.NewServer(NewServer(mgr).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -118,7 +128,7 @@ func waitForStatus(t *testing.T, base, id, want string) Session {
 
 func TestCreateSession_LaunchesAndTracksGoals(t *testing.T) {
 	l := &fakeLauncher{events: doneEvents}
-	srv := newTestServer(t, l, t.TempDir())
+	srv := newTestServer(t, l)
 
 	resp, created := postSession(t, srv.URL, `{"goals":["do it"],"model":"test/model"}`)
 	if resp.StatusCode != http.StatusCreated {
@@ -140,7 +150,7 @@ func TestCreateSession_LaunchesAndTracksGoals(t *testing.T) {
 }
 
 func TestCreateSession_NoGoals(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{})
 	resp, _ := postSession(t, srv.URL, `{"model":"m"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -148,8 +158,33 @@ func TestCreateSession_NoGoals(t *testing.T) {
 	}
 }
 
+func TestCreateSession_UnknownCapability(t *testing.T) {
+	srv := newTestServer(t, &fakeLauncher{})
+	resp, _ := postSession(t, srv.URL, `{"goals":["g"],"capabilities":["nope"]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateSession_ProvisionsCapabilities(t *testing.T) {
+	l := &fakeLauncher{events: doneEvents}
+	srv := newTestServer(t, l)
+	resp, _ := postSession(t, srv.URL, `{"goals":["g"],"capabilities":["rpc","wallet"]}`)
+	resp.Body.Close()
+	if len(l.envs) != 1 {
+		t.Fatalf("expected one launch, got %d", len(l.envs))
+	}
+	joined := strings.Join(l.envs[0], ",")
+	for _, want := range []string{"SOLAI_RPC_URL=https://rpc.test", "SOLAI_WALLET_SEED=seed"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in provisioned env: %v", want, l.envs[0])
+		}
+	}
+}
+
 func TestCreateSession_LaunchFailure(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{err: context.DeadlineExceeded}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{err: context.DeadlineExceeded})
 	resp, _ := postSession(t, srv.URL, `{"goals":["g"]}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
@@ -158,7 +193,7 @@ func TestCreateSession_LaunchFailure(t *testing.T) {
 }
 
 func TestListSessions(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{events: doneEvents}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{events: doneEvents})
 	for i := 0; i < 2; i++ {
 		resp, _ := postSession(t, srv.URL, `{"goals":["g"]}`)
 		resp.Body.Close()
@@ -179,7 +214,7 @@ func TestListSessions(t *testing.T) {
 }
 
 func TestGetSession_NotFound(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{})
 	resp, err := http.Get(srv.URL + "/sessions/nope")
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +226,7 @@ func TestGetSession_NotFound(t *testing.T) {
 }
 
 func TestStopSession(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{proc: newBlockingProc()}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{proc: newBlockingProc()})
 
 	resp, created := postSession(t, srv.URL, `{"goals":["long task"]}`)
 	resp.Body.Close()
@@ -209,7 +244,7 @@ func TestStopSession(t *testing.T) {
 }
 
 func TestStreamEvents_ReplaysTerminalSession(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{events: doneEvents}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{events: doneEvents})
 	resp, created := postSession(t, srv.URL, `{"goals":["g"]}`)
 	resp.Body.Close()
 	waitForStatus(t, srv.URL, created.ID, string(session.StatusDone))
@@ -234,33 +269,31 @@ func TestStreamEvents_ReplaysTerminalSession(t *testing.T) {
 }
 
 func TestListTools(t *testing.T) {
-	dir := t.TempDir()
-	toolDir := filepath.Join(dir, "t1", "bin")
-	if err := os.MkdirAll(toolDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	manifest := `{"name":"t1","description":"a tool","version":"1.2.3","executable":"./bin/t1","required_capabilities":["network-manager"]}`
-	if err := os.WriteFile(filepath.Join(dir, "t1", "manifest.json"), []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	tool.Register("test-tool", "a test tool", func() llm.Tool { return &stubTool{name: "test-tool"} })
+	srv := newTestServer(t, &fakeLauncher{})
 
-	srv := newTestServer(t, &fakeLauncher{}, dir)
 	resp, err := http.Get(srv.URL + "/tools")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var views []toolView
-	if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+	var summaries []tool.Summary
+	if err := json.NewDecoder(resp.Body).Decode(&summaries); err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || views[0].Name != "t1" || views[0].Version != "1.2.3" {
-		t.Errorf("unexpected tools: %+v", views)
+	found := false
+	for _, s := range summaries {
+		if s.Name == "test-tool" && s.Description == "a test tool" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("test-tool not listed: %+v", summaries)
 	}
 }
 
 func TestListCapabilities(t *testing.T) {
-	srv := newTestServer(t, &fakeLauncher{}, t.TempDir())
+	srv := newTestServer(t, &fakeLauncher{})
 	resp, err := http.Get(srv.URL + "/capabilities")
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +303,7 @@ func TestListCapabilities(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&names); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"wallet": true, "solana": true, "memory": true}
+	want := map[string]bool{"network": true, "rpc": true, "wallet": true}
 	for _, n := range names {
 		delete(want, n)
 	}
@@ -283,7 +316,7 @@ func TestListCapabilities(t *testing.T) {
 
 func TestExecLauncher_StreamsEventsAndWaits(t *testing.T) {
 	l := ExecLauncher{Command: `cat >/dev/null; printf '%s\n' '{"type":"session.done","status":"done"}'`}
-	proc, err := l.Start(context.Background(), session.Spec{Goals: []string{"g"}})
+	proc, err := l.Start(context.Background(), session.Spec{Goals: []string{"g"}}, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -298,7 +331,7 @@ func TestExecLauncher_StreamsEventsAndWaits(t *testing.T) {
 
 func TestExecLauncher_Stop(t *testing.T) {
 	l := ExecLauncher{Command: `cat >/dev/null; exec sleep 30`}
-	proc, err := l.Start(context.Background(), session.Spec{Goals: []string{"g"}})
+	proc, err := l.Start(context.Background(), session.Spec{Goals: []string{"g"}}, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

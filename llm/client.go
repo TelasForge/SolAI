@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -96,16 +95,6 @@ func NewClient(cfg Config) (*Client, error) {
 
 // Model returns the model slug the client was configured with.
 func (c *Client) Model() string { return c.model }
-
-// FromEnv builds a Client from the SOLAI_LLM_MODEL, SOLAI_LLM_API_KEY, and
-// SOLAI_LLM_BASE_URL environment variables injected into tool subprocesses.
-func FromEnv() (*Client, error) {
-	return NewClient(Config{
-		APIKey:  os.Getenv("SOLAI_LLM_API_KEY"),
-		BaseURL: os.Getenv("SOLAI_LLM_BASE_URL"),
-		Model:   os.Getenv("SOLAI_LLM_MODEL"),
-	})
-}
 
 // ---- wire types -------------------------------------------------------------
 
