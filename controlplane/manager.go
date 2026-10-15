@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -156,9 +157,31 @@ func (m *Manager) consume(st *sessionState, proc RuntimeProcess) {
 			continue
 		}
 		st.record(e)
+		logEvent(st.id, e)
 	}
 	_ = proc.Wait()
 	st.finish()
+}
+
+// logEvent mirrors the runtime's event stream into the control-plane log so
+// the agent's output is visible on the terminal, not just over SSE.
+func logEvent(id string, e session.Event) {
+	switch e.Type {
+	case session.EventMessage:
+		slog.Info("session message", "session", id, "goal", e.GoalID, "text", e.Message)
+	case session.EventToolCall:
+		slog.Info("tool call", "session", id, "tool", e.Tool)
+	case session.EventToolResult:
+		slog.Debug("tool result", "session", id, "tool", e.Tool, "result", e.Result)
+	case session.EventGoalDone:
+		slog.Info("goal resolved", "session", id, "goal", e.GoalID, "status", e.Status, "note", e.Message)
+	case session.EventSessionDone:
+		slog.Info("session finished", "session", id, "status", e.Status)
+	case session.EventError:
+		slog.Warn("session error", "session", id, "message", e.Message)
+	default:
+		slog.Debug("session event", "session", id, "type", e.Type)
+	}
 }
 
 // ---- sessionState -----------------------------------------------------------

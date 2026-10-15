@@ -16,9 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/melodyogonna/solai/config"
 	"github.com/melodyogonna/solai/controlplane"
 	_ "github.com/melodyogonna/solai/tools"
+	"github.com/melodyogonna/solai/web"
 )
 
 func main() {
@@ -34,11 +37,16 @@ func main() {
 		Command: *launch,
 		Stderr:  os.Stderr,
 	})
-	handler := controlplane.NewServer(mgr).Handler()
+	router := chi.NewRouter()
+	router.Use(middleware.Logger, middleware.Recoverer)
+	// The API handler is a stdlib ServeMux rooted at "/", so strip the /api
+	// prefix before dispatching to it.
+	router.Handle("/api/*", http.StripPrefix("/api", controlplane.NewServer(mgr).Handler()))
+	router.Mount("/", web.New(mgr))
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           handler,
+		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

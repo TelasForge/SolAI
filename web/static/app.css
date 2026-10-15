@@ -1,0 +1,5 @@
+body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 44rem; }
+input, textarea, button { font: inherit; }
+ul { padding-left: 1.2rem; }
+textarea { width: 100%; }
+.events { font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; }

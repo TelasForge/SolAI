@@ -1,7 +1,8 @@
 # AGENTS.md
 
 Guidance for AI coding agents working on SolAI. Keep this file accurate and
-concise. `plan.md` is the design; `README.md` is the user-facing doc.
+concise. `plan.md` is the design; `README.md` is the user-facing doc; `TODO.md` is the
+open-work list.
 
 ## Golden rules
 
@@ -14,7 +15,8 @@ concise. `plan.md` is the design; `README.md` is the user-facing doc.
    structured `tool_calls`.
 4. **Sessions.** A session runs continuously until its goals are resolved or it
    is stopped; one conversation for the life of the session.
-5. Keep `README.md`, `plan.md`, and this file in sync.
+5. Keep `README.md`, `plan.md`, `TODO.md`, and this file in sync. Open work is
+tracked in `TODO.md`.
 
 ## Architecture
 
@@ -47,6 +49,7 @@ controlplane/            session manager, capability provisioning, launcher, HTT
 session/                 session spec, event stream, continuous goal loop
 tool/                    in-process tool registry
 mcp/                     minimal MCP client (Streamable HTTP)
+web/                     minimal server-rendered UI (templ + htmx)
 tools/                   built-in tools (solana, wallet, jupiter, raydium, tokenprice)
 llm/                     OpenRouter client + tool-calling loop
 wallet/                  BIP39 seed derivation and ed25519 keypair
@@ -68,6 +71,12 @@ helpers), `types.go`.
 make all      # .out/solai, .out/solaid
 make test     # go test ./... from the repo root
 ```
+
+`make run` builds and runs `solaid` with `.env` loaded, and `make generate`
+regenerates templ components. Both `templ` and `godotenv` are pinned as `go tool`
+dependencies in `go.mod` (run them with `go tool templ` / `go tool godotenv`).
+The binaries remain environment-only; `.env` is loaded by the tooling, not the
+code.
 
 Before committing: `gofmt -w .` and `go vet ./...` from the repo root must be
 clean.
@@ -107,6 +116,10 @@ clean.
 
 ## Gotchas
 
+- **templ codegen:** after editing `web/*.templ`, run `go tool templ generate
+  ./web` (or `make generate`) and commit the generated `web/*_templ.go`.
+- **Routing:** `cmd/solaid` composes a chi router — the stdlib API is mounted at
+  `/api/*` via `http.StripPrefix`, and the web UI is mounted at `/`.
 - One Go module at the repo root. Do not add nested `go.mod` files.
 - Tool environment variables are read from the process environment; the platform
   injects them.

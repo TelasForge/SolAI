@@ -18,7 +18,7 @@ receives its configuration from the platform that schedules it.
 
 | Binary | Role |
 |---|---|
-| `solaid` | Control-plane HTTP/SSE API. Creates, launches, and tracks sessions, and provisions capabilities into their environment. |
+| `solaid` | Control-plane HTTP/SSE API and the web UI. Creates, launches, and tracks sessions, and provisions capabilities into their environment. |
 | `solai` | Session runtime. Reads a spec from stdin, emits events on stdout. Launched by `solaid`. |
 
 Sandboxing is **not** part of this code. The control plane launches each
@@ -79,14 +79,14 @@ and its tools are exposed as `<server>__<tool>` (for example
 solaid --addr 127.0.0.1:8787 --launch "solai"
 
 # Start a session
-curl -sX POST localhost:8787/sessions -d '{
+curl -sX POST localhost:8787/api/sessions -d '{
   "goals": ["Monitor SOL and report big moves"],
   "tools": ["jupiter-price"],
   "capabilities": ["network", "rpc"]
 }'
 
 # Watch it live
-curl -N localhost:8787/sessions/<id>/events
+curl -N localhost:8787/api/sessions/<id>/events
 ```
 
 `solaid` inherits its environment, and for each session it adds the environment
@@ -96,14 +96,21 @@ granted by the requested capabilities before launching the runtime. Point
 ### API
 
 ```
-POST   /sessions                 create + start (session spec)
-GET    /sessions                 list
-GET    /sessions/{id}            status + goals
-POST   /sessions/{id}/stop
-GET    /sessions/{id}/events     SSE live event stream
-GET    /tools                    registered tools
-GET    /capabilities             available capabilities
+POST   /api/sessions                 create + start (session spec)
+GET    /api/sessions                 list
+GET    /api/sessions/{id}            status + goals
+POST   /api/sessions/{id}/stop
+GET    /api/sessions/{id}/events     SSE live event stream
+GET    /api/tools                    registered tools
+GET    /api/capabilities             available capabilities
 ```
+
+### Web UI
+
+`solaid` also serves a minimal server-rendered UI at `/` (start a session, list
+sessions, view a session). The session page shows a live event feed, populated
+by `EventSource` from the `/api/sessions/{id}/events` stream. It is templ + htmx,
+composed with chi, and shares the same in-memory manager as the API.
 
 ---
 
@@ -195,9 +202,22 @@ verbatim. The runtime is a plain MCP client — no SDK is required.
 ## Build
 
 ```bash
-make all     # .out/solai and .out/solaid
-make test    # go test ./...
+make all        # .out/solai and .out/solaid
+make generate   # regenerate web/*_templ.go from web/*.templ
+make test       # go test ./...
 ```
+
+## Local development
+
+Copy `.env.example` to `.env` and fill it in, then:
+
+```bash
+make run        # builds, then runs solaidd (UI + API) at http://127.0.0.1:8787
+```
+
+`make run` loads `.env` via `go tool godotenv -o -f .env`, so the file wins over
+variables already exported in your shell. The binaries themselves stay
+environment-only; `.env` is gitignored.
 
 All Go code is a single module at the repo root
 (`github.com/melodyogonna/solai`).
@@ -221,6 +241,7 @@ client (curl) ─▶ solaid ──launch(cmd + capability env)──▶ solai ru
 | `runtime/` | Wires environment configuration and a spec into a session |
 | `llm/` | Dependency-free OpenRouter client + native tool-calling loop |
 | `tool/` | In-process tool registry |
+| `web/` | Minimal server-rendered UI (templ + htmx) |
 | `mcp/` | Minimal MCP client: JSON-RPC over Streamable HTTP, tool discovery, adapters |
 | `tools/` | Built-in tools (solana, wallet, jupiter, raydium, tokenprice) |
 | `wallet/` | BIP39 seed derivation and ed25519 keypair |

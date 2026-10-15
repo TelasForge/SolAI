@@ -114,8 +114,9 @@ secrets) in addition to the environment variables:
 
 ## 6. Non-goals
 
-Web UI · database/durability · crash recovery · auth/multi-user · implementing
-sandboxes or any microVM SDK · third-party/out-of-tree tools · scheduling.
+Database/durability · crash recovery · auth/multi-user · implementing sandboxes
+or any microVM SDK · third-party/out-of-tree tools · scheduling. (A minimal web
+UI exists; a rich UI is out of scope for now.)
 
 ## 7. Status
 
@@ -127,4 +128,6 @@ sandboxes or any microVM SDK · third-party/out-of-tree tools · scheduling.
 | Built-in tools (solana, wallet, jupiter, raydium, tokenprice) | done |
 | MCP client (Streamable HTTP) | done |
 | Capability provisioning | done |
+| MCP client (Streamable HTTP) | done |
+| Minimal web UI (templ + htmx) | done |
 | Parallel tool calls | future |
