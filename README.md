@@ -1,52 +1,60 @@
 # SolAI
 
 > **Status:** SolAI is implemented as a minimal agent harness. See `plan.md` for
-> the design and `AGENT.md` for contributor guidance.
+> the design and `AGENTS.md` for contributor guidance.
 
-SolAI runs long-lived Solana agents. A user starts a **session** with one or
-more **goals**, chooses the **tools** and **capabilities** available to it, and
-the agent works continuously until the goals are resolved or the session is
-stopped. LLM access is via [OpenRouter](https://openrouter.ai).
+SolAI runs long-lived Solana agents. A **session** has one or more **goals** and
+a selection of **tools** and **capabilities**, and the agent works continuously
+until the goals are resolved or the session is stopped. LLM access is via
+[OpenRouter](https://openrouter.ai).
+
+SolAI is not a CLI. The runtime is launched by a control plane and receives its
+configuration from the environment, the way a container receives its
+configuration from the platform that schedules it.
 
 ---
 
-## Install
+## Components
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/melodyogonna/solai/main/install.sh | bash
-```
+| Binary | Role |
+|---|---|
+| `solaid` | Control-plane HTTP/SSE API. Creates, launches, and tracks sessions. |
+| `solai` | Session runtime. Reads a spec from stdin, emits events on stdout. Launched by `solaid`. |
 
-Downloads the latest `solai` binary for your architecture (`x86_64` or
-`aarch64`) into `~/.local/bin`. The script prints a `PATH` hint if needed.
-
-**Requirements:** Linux (x86\_64 or aarch64) and internet access to reach the
-OpenRouter API and any external services your tools call.
+Sandboxing is **not** part of this code. The control plane launches each
+session as a command, and the operator points that command at their own
+infrastructure (for example a microVM runner). The runtime and tools only ever
+launch commands; where those commands run is the platform's concern.
 
 ---
 
 ## Concepts
 
-- **Session** — one long-running agent run. Config: goals, model, tools,
-  capabilities. It runs until the goals are done or it is stopped.
+- **Session** — one long-running agent run: goals, model, tools, capabilities.
+  It runs until the goals are done or it is stopped.
 - **Goal** — a task the session must accomplish. The agent works through goals
   one at a time and explicitly marks each `complete`, `fail`, or `block`.
-- **Tool** — a standalone executable with a `manifest.json` that the agent can
-  call. Tools are selected per session.
+- **Tool** — a standalone executable with a `manifest.json`. Tools are selected
+  per session.
 - **Capability** — a system feature (wallet, Solana RPC, memory) selected per
-  session. Capabilities are exposed to the coordinator as tools and are reachable
-  by agentic tools through the `request` protocol: the tool emits a request and
-  the runtime's broker performs it.
+  session. Capabilities are exposed to the coordinator as tools and are
+  reachable by agentic tools through the `request` protocol: the tool emits a
+  request and the runtime's broker performs it.
 
-## Run a session
+---
 
-For a quick local run, `solai start` builds a session from `user-goals` and the
-configured model and runs it on this host.
+## Running
 
-The agent runtime reads a session spec from stdin and streams events as
-JSON lines on stdout:
+Configuration is injected through environment variables (see
+[Configuration](#configuration)); the session itself is a JSON spec.
+
+### Runtime
+
+The runtime reads the spec from stdin and streams events as JSON lines on
+stdout:
 
 ```bash
-solai __runtime < session.json
+solai < session.json
 ```
 
 ```json
@@ -58,23 +66,16 @@ solai __runtime < session.json
 }
 ```
 
-The control plane launches the runtime this way. Sandboxing is **not** this
-code's concern: the operator wraps the launch command with their own
-infrastructure (e.g. a microVM runner). The runtime only launches commands.
+`model` overrides `SOLAI_MODEL` for this session.
 
-## Control-plane API
-
-`solaid` creates, launches, and tracks sessions and relays their events. State
-is in-memory. Each session is launched as a command, so the operator can point
-`--launch` at a sandbox wrapper (e.g. a microVM runner).
+### Control plane
 
 ```bash
-solaid --addr 127.0.0.1:8787 --launch "solai __runtime"
+solaid --addr 127.0.0.1:8787 --launch "solai"
 
 # Start a session
 curl -sX POST localhost:8787/sessions -d '{
   "goals": ["Monitor SOL and report big moves"],
-  "model": "anthropic/claude-sonnet-4",
   "tools": ["token-price"],
   "capabilities": ["wallet", "solana", "memory", "network-manager"]
 }'
@@ -82,6 +83,12 @@ curl -sX POST localhost:8787/sessions -d '{
 # Watch it live
 curl -N localhost:8787/sessions/<id>/events
 ```
+
+`solaid` inherits its environment, so the runtime it launches gets the same
+injected configuration. Point `--launch` at a wrapper (e.g. a microVM runner)
+to isolate sessions.
+
+### API
 
 ```
 POST   /sessions                 create + start (session spec)
@@ -97,54 +104,53 @@ GET    /capabilities             available capabilities
 
 ## Configuration
 
-Configuration lives in `~/.solai/config.json` and is managed with
-`solai config set/get/list`.
+Everything is read from the process environment. There is no config file.
 
-**Model & credentials:**
+| Variable | Required | Description |
+|---|---|---|
+| `SOLAI_MODEL` | yes | OpenRouter model slug (e.g. `anthropic/claude-sonnet-4`) |
+| `OPENROUTER_API_KEY` | yes | OpenRouter API key (shared by the agent and tools) |
+| `SOLAI_OPENROUTER_BASE_URL` | no | Override the OpenRouter API root |
+| `SOLAI_WALLET_SEED` | no | BIP39 mnemonic; a new wallet is generated if unset |
+| `SOLAI_RPC_URL` | no | Solana RPC endpoint (default `https://api.mainnet-beta.solana.com`) |
+| `SOLAI_COMMITMENT` | no | `finalized`, `confirmed`, or `processed` (default `confirmed`) |
+| `SOLAI_TOOLS_DIR` | no | Directory containing installed tools (default `/tools`, else `~/.solai/tools`) |
+| `SOLAI_LOG_LEVEL` | no | `debug`, `info`, `warn`, or `error` (default `info`) |
+| `SOLAI_LAUNCH_CMD` | no | Runtime launch command used by `solaid` (default `solai`) |
 
-| Key | Description |
-|---|---|
-| `model.name` | OpenRouter model slug for the coordinator (e.g. `anthropic/claude-sonnet-4`) |
-| `provider.openrouter` | OpenRouter API key (shared by the agent and tools) |
-| `openrouter.base-url` | Optional OpenRouter API root override |
-
-**Agent settings:**
-
-| Key | Description |
-|---|---|
-| `wallet-seed` | BIP39 mnemonic — a new wallet is generated if unset |
-
-**Solana settings:**
-
-| Key | Description |
-|---|---|
-| `solana.rpc-url` | Solana RPC endpoint (default: `https://api.mainnet-beta.solana.com`) |
-| `solana.commitment` | `finalized`, `confirmed`, or `processed` (default: `confirmed`) |
-
-**Tool environment variables:**
-
-```bash
-solai config set tool-env.<tool>.<VAR_NAME> <value>
-```
-
-Values are injected into the tool's environment at runtime and redacted in
-`config list` output.
+A platform injects these the same way it injects any other container
+configuration (Kubernetes `env`, a secret, a mounted file rendered into a
+variable, and so on).
 
 ---
 
 ## Tools
 
-### Installing
+### Layout
 
-```bash
-solai install token-price              # latest curated release
-solai install token-price@v1.0.0       # specific version
-solai install owner/repo               # third-party tool from a GitHub release
-solai uninstall <name>
+Tools live in `SOLAI_TOOLS_DIR`, populated by the environment (a mounted
+volume, the image, or an init container):
+
+```
+$SOLAI_TOOLS_DIR/<name>/
+  manifest.json
+  bin/<name>
 ```
 
-Tools are stored in `~/.solai/tools/`. A release must contain `manifest.json`,
-`<name>-linux-<arch>` binaries, and (optionally) `checksums.txt`.
+### Tool environment variables
+
+A tool declares the variables it needs in its manifest. The runtime resolves
+them from its own environment and injects them into the tool subprocess:
+
+```json
+{
+  "env": [
+    { "name": "JUPITER_API_KEY", "sensitive": true, "required": false }
+  ]
+}
+```
+
+A missing variable marked `required` disables the tool with a warning.
 
 ### Writing a tool
 
@@ -191,11 +197,17 @@ go to stderr only. The result is the file — not stdout. Go tools use the share
 map. Entries with a `source` (e.g. `"wallet"`) are resolved automatically;
 others are supplied by the coordinator when fulfilling a capability request.
 
-### Adding a tool locally
+---
 
-1. Create `~/.solai/tools/my-tool/manifest.json` (`executable` must be `"./bin/my-tool"`).
-2. Place the binary at `~/.solai/tools/my-tool/bin/my-tool` (chmod 0755).
-3. It is discovered on the next session that selects it.
+## Build
+
+```bash
+make all     # .out/solai and .out/solaid
+make test    # go test ./...
+```
+
+All Go code is a single module at the repo root
+(`github.com/melodyogonna/solai`).
 
 ---
 
@@ -209,13 +221,19 @@ client (curl) ─▶ solaid ──launch(cmd)──▶ agent runtime ──exec�
 
 | Component | Responsibility |
 |---|---|
-| `solaid` | Control-plane HTTP/SSE API; session lifecycle; launches the runtime |
-| agent runtime | One session's goal loop; emits events |
+| `cmd/solaid` | Control-plane binary |
+| `cmd/solai` | Session runtime binary |
+| `controlplane/` | Session manager, launcher, HTTP/SSE server |
+| `session/` | Session spec, event stream, continuous goal loop |
+| `runtime/` | Wires environment configuration and a spec into a session |
 | `llm/` | Dependency-free OpenRouter client + native tool-calling loop |
 | `ipc/` | File-based tool IPC protocol: typed input/output, atomic writes |
-| `solai-agent/` | Session runtime (`session/`), control plane (`controlplane/`, `cmd/solaid`), and CLI (`cli/`) |
-| `tools/*` | Agentic tools |
-| `registry/` | Tool installation from GitHub releases |
+| `capability/` | Wallet, Solana RPC, memory, tool IPC, and the capability broker |
+| `tool/` | Tool discovery, manifest parsing, subprocess execution |
+| `wallet/` | BIP39 seed derivation and ed25519 keypair |
+| `config/` | Environment-based configuration |
+| `prompts/` | Embedded system prompt |
+| `registry/` | Tool installation from GitHub releases (library) |
 | `ratelimit/` | Retry and rate-limit strategies |
 
-See `plan.md` for the full design and build order.
+See `plan.md` for the full design.

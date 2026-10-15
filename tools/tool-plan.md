@@ -80,7 +80,7 @@ code, so a tool may `exit 1` after writing a structured `error` and the
 coordinator will surface that error. A missing or malformed `output.json` is an
 infrastructure error.
 
-## The Shared `llm` and `ipc` Modules
+## The Shared `llm` and `ipc` Packages
 
 Tools import `github.com/melodyogonna/solai/llm` for the OpenRouter client and
 the agent loop, and `github.com/melodyogonna/solai/ipc` for the file protocol.

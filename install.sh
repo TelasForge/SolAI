@@ -3,7 +3,6 @@ set -euo pipefail
 
 REPO="melodyogonna/solai"
 BIN_DIR="${HOME}/.local/bin"
-BIN_NAME="solai"
 
 # Resolve architecture
 ARCH="$(uname -m)"
@@ -16,22 +15,25 @@ case "$ARCH" in
     ;;
 esac
 
-ASSET="${BIN_NAME}-linux-${ARCH}"
+install_bin() {
+  local name="$1"
+  local asset="${name}-linux-${ARCH}"
+  local url="https://github.com/${REPO}/releases/latest/download/${asset}"
+  echo "Downloading ${asset} from ${REPO}..."
+  curl -fsSL "$url" -o "${BIN_DIR}/${name}"
+  chmod +x "${BIN_DIR}/${name}"
+}
 
-# Resolve download URL — latest release
-URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
-
-echo "Downloading ${ASSET} from ${REPO}..."
 mkdir -p "$BIN_DIR"
-curl -fsSL "$URL" -o "${BIN_DIR}/${BIN_NAME}"
-chmod +x "${BIN_DIR}/${BIN_NAME}"
+install_bin solai
+install_bin solaid
 
-echo "Installed to ${BIN_DIR}/${BIN_NAME}"
+echo "Installed solai and solaid to ${BIN_DIR}"
 
 # Advise on PATH if needed
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
   echo ""
-  echo "Add solai to your PATH by running:"
+  echo "Add ${BIN_DIR} to your PATH by running:"
   echo ""
   echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
   echo ""

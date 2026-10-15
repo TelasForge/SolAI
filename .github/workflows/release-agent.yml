@@ -16,16 +16,19 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: solai-agent/go.mod
-          cache-dependency-path: solai-agent/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Build binaries
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o solai-linux-amd64 ./solai-agent
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o solai-linux-arm64 ./solai-agent
+          for bin in solai solaid; do
+            for arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o "${bin}-linux-${arch}" "./cmd/${bin}"
+            done
+          done
 
       - name: Generate checksums
-        run: sha256sum solai-linux-amd64 solai-linux-arm64 > checksums.txt
+        run: sha256sum solai-linux-amd64 solai-linux-arm64 solaid-linux-amd64 solaid-linux-arm64 > checksums.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -33,4 +36,6 @@ jobs:
           files: |
             solai-linux-amd64
             solai-linux-arm64
+            solaid-linux-amd64
+            solaid-linux-arm64
             checksums.txt

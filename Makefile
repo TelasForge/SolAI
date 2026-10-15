@@ -1,15 +1,15 @@
-.PHONY: all solai solaid tools token-price clean test test-agent test-tools
+.PHONY: all solai solaid tools token-price clean test
 
 # Build everything
 all: solai solaid tools
 
-# Build the solai CLI/runtime binary → .out/solai
+# Build the solai session runtime binary → .out/solai
 solai:
-	CGO_ENABLED=0 go build -o .out/solai ./solai-agent
+	CGO_ENABLED=0 go build -o .out/solai ./cmd/solai
 
 # Build the solaid control-plane binary → .out/solaid
 solaid:
-	CGO_ENABLED=0 go build -o .out/solaid ./solai-agent/cmd/solaid
+	CGO_ENABLED=0 go build -o .out/solaid ./cmd/solaid
 
 # Build all tools
 tools: token-price
@@ -19,17 +19,8 @@ tools: token-price
 token-price:
 	go build -o tools/token-price/bin/token-price ./tools/token-price
 
-test: test-agent test-tools
-
-test-agent:
-	cd solai-agent && go test ./...
-
-test-tools:
-	@for mod in tools/*/go.mod; do \
-		dir=$$(dirname "$$mod"); \
-		echo "Testing $$dir"; \
-		(cd "$$dir" && go test ./...) || exit 1; \
-	done
+test:
+	go test ./...
 
 clean:
 	rm -rf .out tools/token-price/bin

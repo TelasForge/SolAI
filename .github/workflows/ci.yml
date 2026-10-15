@@ -6,53 +6,15 @@ on:
   pull_request:
 
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      modules: ${{ steps.diff.outputs.modules }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Detect changed modules
-        id: diff
-        run: |
-          if git rev-parse HEAD^ > /dev/null 2>&1; then
-            changed=$(git diff --name-only HEAD^ HEAD)
-          else
-            changed=$(git ls-files)
-          fi
-
-          # For every go.mod in the repo, include its module if any file
-          # within that directory appears in the changed set.
-          modules=$(
-            find . -name go.mod -not -path '*/vendor/*' \
-              | sed 's|/go.mod||; s|^./||' \
-              | while read -r mod; do
-                  if echo "$changed" | grep -q "^${mod}/"; then
-                    echo "$mod"
-                  fi
-                done \
-              | jq -R -s -c 'split("\n") | map(select(length > 0))'
-          )
-          echo "modules=$modules" >> "$GITHUB_OUTPUT"
-
   test:
-    needs: detect
-    if: needs.detect.outputs.modules != '[]' && needs.detect.outputs.modules != ''
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module: ${{ fromJson(needs.detect.outputs.modules) }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-      - name: Test ${{ matrix.module }}
-        run: cd ${{ matrix.module }} && go test ./...
+      - name: Test
+        run: go test ./...

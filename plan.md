@@ -8,8 +8,9 @@ stopped. LLM access is via OpenRouter.
 The plan is deliberately minimal. It describes the smallest system that
 accomplishes that goal, with no durability, UI, or in-code sandboxing.
 
-> **Status:** implemented. `solai start` runs a local session, `solai __runtime`
-> is the control-plane-launched runtime, and `solaid` exposes the HTTP/SSE API.
+> **Status:** implemented. `solai` is the control-plane-launched session
+> runtime; `solaid` exposes the HTTP/SSE API. Configuration is read from the
+> process environment.
 
 ## 1. Essence: two components
 
@@ -52,6 +53,11 @@ No budgets, scheduling, or approvals yet.
 
 One process per session. It reads the session spec from **stdin**, loads only
 the selected tools, and runs the goal loop.
+
+Configuration (model, OpenRouter key, wallet seed, RPC endpoint, tools
+directory) is read from the process environment, not from the spec. The spec
+carries only the per-session choices: goals, an optional model override, the
+selected tools, and the selected capabilities.
 
 ### 4.1 Loop
 
@@ -157,12 +163,12 @@ gates · OCI tool registry · per-tool model selection.
 ## 7. Build order
 
 1. ✅ **Session runtime** — session spec in; continuous goal loop; event stream
-   out. (`solai-agent/session`)
+   out. (`session/`)
 2. ✅ **Control-plane API** — session CRUD + process supervisor + SSE, in-memory.
-   (`solai-agent/controlplane`, `cmd/solaid`)
+   (`controlplane/`, `cmd/solaid`)
 3. ✅ **Tool protocol** — selected-tools-only loading; file IPC with atomic
    `output.json` writes and the exit-code/result discriminator. (shared `ipc/`
-   module, `tool.Select`, `tool.RunTool`)
+   package, `tool.Select`, `tool.RunTool`)
 4. ✅ **Capability broker** — expose the selected capabilities to tools via the
    `request` protocol. (`capability.Broker`, brokering in `tool.AgenticTool`)
 
